@@ -1,0 +1,32 @@
+{
+  "routes": [
+    {
+      "constructor": "EditorDebug",
+      "dynamicParams": [],
+      "isNotFound": false,
+      "path": "/editor/debug",
+      "routePattern": "/editor/debug"
+    },
+    {
+      "constructor": "Editor",
+      "dynamicParams": [],
+      "isNotFound": false,
+      "path": "/editor",
+      "routePattern": "/editor"
+    },
+    {
+      "constructor": "Index",
+      "dynamicParams": [],
+      "isNotFound": false,
+      "path": "/",
+      "routePattern": "/"
+    },
+    {
+      "constructor": "NotFound",
+      "dynamicParams": [],
+      "isNotFound": true,
+      "path": null,
+      "routePattern": "/not-found"
+    }
+  ]
+}

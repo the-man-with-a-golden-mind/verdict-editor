@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Verdict IDE</title>
+    <meta name="description" content="An intelligent editor for the Verdict language — live types, diagnostics, and inline results." />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./src/styles/main.css" />
+  </head>
+  <body class="bg-[#0b0f1a]">
+    <div id="app"></div>
+    <!--
+      Load the editor (Monaco + the Verdict compiler/VM — by far the heaviest
+      code in the app) ONLY on the /editor route, and only the first time it's
+      reached. Other pages (e.g. the landing page) ship none of it. The import
+      defines the <verdict-editor> custom element; any already-rendered instance
+      upgrades automatically once it's defined.
+    -->
+    <script type="module">
+      let loaded = false;
+      const ensureEditor = () => {
+        const path = location.pathname.replace(/\/+$/, "");
+        if (!loaded && (path === "/editor" || path.startsWith("/editor/"))) {
+          loaded = true;
+          import("/src/VerdictEditor.ts");
+        }
+      };
+      ensureEditor();
+      // Catch client-side SPA navigations (ps-spa uses History pushState).
+      window.addEventListener("popstate", ensureEditor);
+      const _push = history.pushState;
+      history.pushState = function (...args) {
+        _push.apply(this, args);
+        ensureEditor();
+      };
+    </script>
+    <script src="/app.js"></script>
+  </body>
+</html>

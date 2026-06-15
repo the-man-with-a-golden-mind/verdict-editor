@@ -1,0 +1,32 @@
+{
+  "name": "ps-spa-temp-app",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.3.9",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "preview": "vite preview",
+    "cf:whoami": "npx --yes wrangler@latest whoami",
+    "cf:deploy": "npm run build && npx --yes wrangler@latest pages deploy dist",
+    "cf:deploy:prod": "npm run build && npx --yes wrangler@latest pages deploy dist --branch main",
+    "cf:pages:create": "npx --yes wrangler@latest pages project create fin-editor"
+  },
+  "dependencies": {
+    "big-integer": "^1.6.52",
+    "monaco-editor": "^0.55.1",
+    "ps-spa": "file:.ps-spa-repo"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.1",
+    "autoprefixer": "^10.5.0",
+    "esbuild": "^0.24.0",
+    "postcss": "^8.5.15",
+    "puppeteer": "^25.1.0",
+    "purescript": "^0.15.15",
+    "spago": "^1.0.4",
+    "tailwindcss": "^4.3.1",
+    "vite": "^5.4.19",
+    "vite-plugin-monaco-editor": "^1.1.0"
+  }
+}

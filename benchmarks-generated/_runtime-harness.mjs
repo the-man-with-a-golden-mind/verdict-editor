@@ -1,0 +1,506 @@
+import fs from "node:fs";
+import path from "node:path";
+import vm from "node:vm";
+import { performance } from "node:perf_hooks";
+
+// Browser.js is shipped as an ES module (`export const X = ...`), but the harness
+// evaluates it inside `vm.Script` (classic script context). Rewrite the exports
+// inline so they land on `module.exports` like before.
+const browserSource = fs
+  .readFileSync(path.join(process.cwd(), "src", "PsSpa", "Browser.js"), "utf8")
+  .replace(/^export\s+const\s+(\w+)\s*=\s*/gm, "module.exports.$1 = ");
+
+const HTML_NS = "http://www.w3.org/1999/xhtml";
+
+function Text(value0) {
+  this.value0 = value0;
+}
+
+function Element(value0, value1, value2) {
+  this.value0 = value0;
+  this.value1 = value1;
+  this.value2 = value2;
+}
+
+function Keyed(value0) {
+  this.value0 = value0;
+}
+
+function Tuple(value0, value1) {
+  this.value0 = value0;
+  this.value1 = value1;
+}
+
+function Attribute(value0, value1) {
+  this.value0 = value0;
+  this.value1 = value1;
+}
+
+function OnClick(value0) {
+  this.value0 = value0;
+}
+
+function OnEvent(value0, value1) {
+  this.value0 = value0;
+  this.value1 = value1;
+}
+
+function OnEventOptions(value0, value1, value2) {
+  this.value0 = value0;
+  this.value1 = value1;
+  this.value2 = value2;
+}
+
+function text(value) {
+  return new Text(value);
+}
+
+function attr(name, value) {
+  return new Attribute(name, value);
+}
+
+function onClick(handler) {
+  return new OnClick(handler);
+}
+
+function onEvent(name, handler) {
+  return new OnEvent(name, handler);
+}
+
+function onEventOptions(name, options, handler) {
+  return new OnEventOptions(name, options, handler);
+}
+
+function node(tag, attrs, children) {
+  return new Element(tag, attrs, children);
+}
+
+// Mirror PsSpa.Html.keyed: pairs are [key, html] entries; we lift them into the
+// Tuple constructor shape PureScript uses at runtime.
+function keyed(tag, attrs, pairs) {
+  var children = pairs.map(function (pair) {
+    return new Tuple(pair[0], pair[1]);
+  });
+  return new Keyed({ tag: tag, attrs: attrs, children: children });
+}
+
+class FakeTextNode {
+  constructor(value) {
+    this.nodeType = 3;
+    this.parentNode = null;
+    this.nodeValue = value;
+  }
+
+  get textContent() {
+    return this.nodeValue;
+  }
+
+  set textContent(value) {
+    this.nodeValue = value;
+  }
+}
+
+class FakeElement {
+  constructor(tagName, ownerDocument, namespaceURI = HTML_NS) {
+    this.attributes = {};
+    this.checked = false;
+    this.childNodes = [];
+    this.listeners = new Map();
+    this.muted = false;
+    this.namespaceURI = namespaceURI;
+    this.ownerDocument = ownerDocument;
+    this.parentNode = null;
+    this.selected = false;
+    this.tagName = tagName.toUpperCase();
+    this.nodeType = 1;
+    this.nodeName = tagName.toUpperCase();
+    this.scrollLeft = 0;
+    this.scrollTop = 0;
+    this.value = "";
+  }
+
+  get children() {
+    return this.childNodes.filter((node) => node.nodeType === 1);
+  }
+
+  appendChild(child) {
+    if (child.parentNode) {
+      child.parentNode.removeChild(child);
+    }
+    child.parentNode = this;
+    this.childNodes.push(child);
+    this.maybeResetScrollOnChildMutation();
+    return child;
+  }
+
+  removeChild(child) {
+    const index = this.childNodes.indexOf(child);
+    if (index !== -1) {
+      this.childNodes.splice(index, 1);
+      child.parentNode = null;
+      this.maybeResetScrollOnChildMutation();
+    }
+    return child;
+  }
+
+  replaceChild(newChild, oldChild) {
+    const index = this.childNodes.indexOf(oldChild);
+    if (index !== -1) {
+      if (newChild.parentNode) {
+        newChild.parentNode.removeChild(newChild);
+      }
+      this.childNodes[index] = newChild;
+      newChild.parentNode = this;
+      oldChild.parentNode = null;
+      this.maybeResetScrollOnChildMutation();
+    }
+    return oldChild;
+  }
+
+  insertBefore(newChild, referenceChild) {
+    if (newChild.parentNode) {
+      newChild.parentNode.removeChild(newChild);
+    }
+    if (referenceChild == null) {
+      this.childNodes.push(newChild);
+    } else {
+      const index = this.childNodes.indexOf(referenceChild);
+      if (index === -1) {
+        this.childNodes.push(newChild);
+      } else {
+        this.childNodes.splice(index, 0, newChild);
+      }
+    }
+    newChild.parentNode = this;
+    this.maybeResetScrollOnChildMutation();
+    return newChild;
+  }
+
+  maybeResetScrollOnChildMutation() {
+    if (this.resetScrollOnChildMutation) {
+      this.scrollLeft = 0;
+      this.scrollTop = 0;
+    }
+  }
+
+  addEventListener(type, listener) {
+    const listeners = this.listeners.get(type) ?? [];
+    listeners.push(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type, listener) {
+    const listeners = this.listeners.get(type) ?? [];
+    this.listeners.set(
+      type,
+      listeners.filter((candidate) => candidate !== listener)
+    );
+  }
+
+  setAttribute(name, value) {
+    this.attributes[name] = value;
+    if (name === "checked" || name === "selected" || name === "muted") {
+      this[name] = value !== "false" && value !== "";
+    }
+    if (name === "id") {
+      this.ownerDocument.registerElement(value, this);
+    }
+    if (name === "value") {
+      this.value = value;
+    }
+  }
+
+  getAttribute(name) {
+    return this.attributes[name] ?? null;
+  }
+
+  removeAttribute(name) {
+    delete this.attributes[name];
+    if (name === "checked" || name === "selected" || name === "muted") {
+      this[name] = false;
+    }
+    if (name === "value") {
+      this.value = "";
+    }
+  }
+
+  set innerHTML(_value) {
+    this.childNodes = [];
+  }
+
+  get innerHTML() {
+    return "";
+  }
+}
+
+class FakeDocument {
+  constructor(rootId) {
+    this._elementsById = new Map();
+    this._listeners = new Map();
+    this.title = "";
+    this.body = new FakeElement("body", this);
+    const root = new FakeElement("div", this);
+    root.setAttribute("id", rootId);
+    this.body.appendChild(root);
+  }
+
+  registerElement(id, element) {
+    this._elementsById.set(id, element);
+  }
+
+  createElement(tagName) {
+    return new FakeElement(tagName, this, HTML_NS);
+  }
+
+  createElementNS(namespaceURI, tagName) {
+    return new FakeElement(tagName, this, namespaceURI);
+  }
+
+  createTextNode(value) {
+    return new FakeTextNode(value);
+  }
+
+  getElementById(id) {
+    return this._elementsById.get(id) ?? null;
+  }
+
+  addEventListener(type, listener) {
+    const listeners = this._listeners.get(type) ?? [];
+    listeners.push(listener);
+    this._listeners.set(type, listeners);
+  }
+
+  removeEventListener(type, listener) {
+    const listeners = this._listeners.get(type) ?? [];
+    this._listeners.set(
+      type,
+      listeners.filter((candidate) => candidate !== listener)
+    );
+  }
+
+  dispatchEvent(type, event) {
+    const listeners = this._listeners.get(type) ?? [];
+    for (const listener of listeners) {
+      listener(event);
+    }
+  }
+}
+
+class FakeWindow {
+  constructor() {
+    this.location = {
+      hash: "",
+      href: "https://ps-spa.local/",
+      origin: "https://ps-spa.local",
+      pathname: "/",
+      protocol: "https:",
+      search: ""
+    };
+    this.listeners = new Map();
+    this.history = {
+      pushState: (_state, _title, href) => {
+        this.setHref(href);
+      },
+      replaceState: (_state, _title, href) => {
+        this.setHref(href);
+      }
+    };
+  }
+
+  setHref(href) {
+    const url = new URL(href, "https://ps-spa.local");
+    this.location.href = url.href;
+    this.location.origin = url.origin;
+    this.location.pathname = url.pathname;
+    this.location.protocol = url.protocol;
+    this.location.search = url.search;
+    this.location.hash = url.hash;
+  }
+
+  addEventListener(type, listener) {
+    const listeners = this.listeners.get(type) ?? [];
+    listeners.push(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type, listener) {
+    const listeners = this.listeners.get(type) ?? [];
+    this.listeners.set(
+      type,
+      listeners.filter((candidate) => candidate !== listener)
+    );
+  }
+}
+
+export {
+  Text,
+  Element,
+  Keyed,
+  Tuple,
+  Attribute,
+  OnClick,
+  OnEvent,
+  OnEventOptions,
+  text,
+  attr,
+  onClick,
+  onEvent,
+  onEventOptions,
+  node,
+  keyed
+};
+
+function loadBrowserModule(document, window) {
+  const module = { exports: {} };
+  const context = vm.createContext({
+    document,
+    exports: module.exports,
+    module,
+    URL,
+    window
+  });
+
+  new vm.Script(browserSource, { filename: "Browser.js" }).runInContext(context);
+  return module.exports;
+}
+
+export function createEnvironment(rootId = "app") {
+  const document = new FakeDocument(rootId);
+  const window = new FakeWindow();
+  return {
+    browser: loadBrowserModule(document, window),
+    document,
+    rootId,
+    window
+  };
+}
+
+export function run(label, iterations, fn) {
+  const started = performance.now();
+  for (let index = 0; index < iterations; index += 1) {
+    fn(index);
+  }
+  const elapsed = performance.now() - started;
+  return {
+    averageMs: elapsed / iterations,
+    iterations,
+    label,
+    opsPerSecond: iterations / (elapsed / 1000),
+    totalMs: elapsed
+  };
+}
+
+export function buildPageDocument(options = {}) {
+  const {
+    buttonsPerCard = 2,
+    cardsPerSection = 8,
+    links = 10,
+    route = "/",
+    sections = 4,
+    title = "Page"
+  } = options;
+
+  const navigationLinks = Array.from({ length: links }, (_, index) =>
+    node(
+      "a",
+      [attr("href", `${route}nav-${index}`), attr("class", "nav-link"), onClick(() => {})],
+      [text(`Link ${index + 1}`)]
+    )
+  );
+
+  const sectionNodes = Array.from({ length: sections }, (_, sectionIndex) =>
+    node("section", [attr("class", "section")], [
+      node("h2", [attr("class", "section-title")], [text(`Section ${sectionIndex + 1}`)]),
+      node(
+        "div",
+        [attr("class", "cards")],
+        Array.from({ length: cardsPerSection }, (_, cardIndex) =>
+          node("article", [attr("class", "card")], [
+            node("h3", [], [text(`Card ${sectionIndex + 1}-${cardIndex + 1}`)]),
+            node("p", [], [text(`Route ${route} card ${cardIndex + 1}`)]),
+            node(
+              "div",
+              [attr("class", "actions")],
+              Array.from({ length: buttonsPerCard }, (_, buttonIndex) =>
+                node(
+                  "button",
+                  [attr("type", "button"), attr("data-action", `${sectionIndex}-${cardIndex}-${buttonIndex}`), onClick(() => {})],
+                  [text(`Action ${buttonIndex + 1}`)]
+                )
+              )
+            )
+          ])
+        )
+      )
+    ])
+  );
+
+  return {
+    title,
+    body: [
+      node("main", [attr("class", "page-shell")], [
+        node("header", [attr("class", "hero")], [
+          node("h1", [attr("class", "title")], [text(title)]),
+          node("p", [attr("class", "lede")], [text(`Framework runtime benchmark for ${route}`)]),
+          node("nav", [attr("class", "nav")], navigationLinks)
+        ]),
+        ...sectionNodes
+      ])
+    ]
+  };
+}
+
+export function runRenderBenchmark(label, iterations, documentFactory) {
+  const env = createEnvironment();
+  const render = env.browser.renderDocument;
+
+  return run(label, iterations, () => {
+    render({ document: documentFactory(), rootId: env.rootId })();
+  });
+}
+
+export function runRerenderBenchmark(label, iterations, documentFactory) {
+  const env = createEnvironment();
+  const render = env.browser.renderDocument;
+
+  return run(label, iterations, () => {
+    render({ document: documentFactory(), rootId: env.rootId })();
+    render({ document: documentFactory(), rootId: env.rootId })();
+  });
+}
+
+export function runNavigationBenchmark(label, iterations, href) {
+  const env = createEnvironment();
+  const anchor = env.document.createElement("a");
+  anchor.setAttribute("href", href);
+  env.document.body.appendChild(anchor);
+
+  let seenHref = null;
+  const cleanup = env.browser.onInternalUrlRequest((nextHref) => () => {
+    seenHref = nextHref;
+  })();
+
+  const scenario = run(label, iterations, () => {
+    let prevented = false;
+    env.document.dispatchEvent("click", {
+      altKey: false,
+      button: 0,
+      ctrlKey: false,
+      defaultPrevented: false,
+      metaKey: false,
+      preventDefault() {
+        prevented = true;
+        this.defaultPrevented = true;
+      },
+      shiftKey: false,
+      target: anchor
+    });
+
+    if (!prevented || seenHref !== href) {
+      throw new Error(`Navigation benchmark failed for ${href}`);
+    }
+  });
+
+  cleanup();
+  return scenario;
+}
