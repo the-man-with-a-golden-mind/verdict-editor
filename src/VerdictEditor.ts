@@ -1,13 +1,10 @@
-// Import `edcore.main`, not the full `monaco-editor` barrel: it includes the
-// editor core PLUS all the editor contributions we rely on (hover widget,
-// completion/suggest widget, bracket matching, find, …) but NOT the 200+ built-in
-// languages (~4MB) that the barrel bundles and we never use — our `verdict` and
-// `finvm-bytecode` languages are custom Monarch grammars. This keeps hover and
-// completion working while still slashing the dev request count and prod bundle.
-//
-// (Plain `editor.api` is smaller still but ships ZERO contributions, so hover and
-// completion silently render nothing — don't switch to it.)
-import * as monaco from 'monaco-editor/esm/vs/editor/edcore.main';
+// Monaco optimization: use the lightweight editor API and import only the
+// contributions we actively use. This trims bundle size versus `edcore.main`.
+import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
+import 'monaco-editor/esm/vs/editor/contrib/hover/browser/hoverContribution.js';
+import 'monaco-editor/esm/vs/editor/contrib/suggest/browser/suggest.js';
+import 'monaco-editor/esm/vs/editor/contrib/bracketMatching/browser/bracketMatching.js';
+import 'monaco-editor/esm/vs/editor/contrib/find/browser/findController.js';
 import {
   escapeHtml,
   extractDbTables,
@@ -80,7 +77,7 @@ function defineVerdictTheme() {
       { token: 'string.escape', foreground: 'fbbf24' },
       { token: 'number', foreground: 'f0abfc' },                     // fuchsia-300
       { token: 'number.float', foreground: 'f0abfc' },
-      { token: 'comment', foreground: '64748b', fontStyle: 'italic' },
+      { token: 'comment', foreground: '7c8596' },
       { token: 'operator', foreground: '93c5fd' },                   // blue-300
       { token: 'delimiter', foreground: '94a3b8' },
       { token: 'identifier', foreground: 'e2e8f0' },
@@ -212,6 +209,7 @@ function defineVerdict() {
       ],
       whitespace: [
         [/[ \t\r\n]+/, 'white'],
+        [/--.*$/, 'comment'],
         [/\/\/.*$/, 'comment']
       ]
     }
@@ -324,18 +322,22 @@ function defineVerdict() {
 
 class VerdictEditorElement extends HTMLElement {
   private activeSideTab: 'output' | 'inputs' = 'output';
-  private activeMainTab: 'editor' | 'db' = 'editor';
+  private activeMainTab: 'editor' | 'db' | 'debug' = 'editor';
   private editor: monaco.editor.IStandaloneCodeEditor | null = null;
   private bytecodeEditor: monaco.editor.IStandaloneCodeEditor | null = null;
   private container!: HTMLDivElement;
   private outputPanel!: HTMLDivElement;
   private inputsPanel: HTMLDivElement | null = null;
   private dbPanel: HTMLDivElement | null = null;
+  private debugPanel: HTMLDivElement | null = null;
+  private debugVizPanel: HTMLDivElement | null = null;
   private inputsPreview: HTMLDivElement | null = null;
   private inputsList: HTMLDivElement | null = null;
   private dbQueryInput: HTMLInputElement | null = null;
   private dbQueryOutput: HTMLDivElement | null = null;
   private vmStatePanel: HTMLDivElement | null = null;
+  private loadingWrap: HTMLDivElement | null = null;
+  private loadingLabel: HTMLDivElement | null = null;
   private mainContainer!: HTMLDivElement;
   private leftPane: HTMLDivElement | null = null;
   private rightPane: HTMLDivElement | null = null;
@@ -349,11 +351,14 @@ class VerdictEditorElement extends HTMLElement {
   private tickInFlight = false;
   private liveRunning = false;
   private liveTickCount = 0;
+  private busyCount = 0;
   private finvmState: Record<string, unknown> = {};
   private marketHistoryCents: number[] = [];
   private latestPriceCents = 0;
   private latestMovingAverageCents = 0;
   private resultDecorations: monaco.editor.IEditorDecorationsCollection | null = null;
+  private latestCompiledProgram: unknown = null;
+  private latestVmSnapshot: unknown = null;
   private built = false;
 
   protected isDebugView(): boolean {
@@ -395,7 +400,7 @@ class VerdictEditorElement extends HTMLElement {
     const editorHeader = sectionHeader('Workspace', 'Main.verdict');
     const mainTabBar = document.createElement('div');
     mainTabBar.className = 'flex items-center gap-1 border-b border-slate-800 bg-slate-950 px-2 py-1.5';
-    const mkMainTabBtn = (id: 'editor' | 'db', label: string) => {
+    const mkMainTabBtn = (id: 'editor' | 'db' | 'debug', label: string) => {
       const btn = document.createElement('button');
       btn.dataset.mainTabId = id;
       btn.className = 'rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wider';
@@ -405,6 +410,7 @@ class VerdictEditorElement extends HTMLElement {
     };
     mainTabBar.appendChild(mkMainTabBtn('editor', 'Editor'));
     mainTabBar.appendChild(mkMainTabBtn('db', 'DB'));
+    mainTabBar.appendChild(mkMainTabBtn('debug', 'Debug'));
 
     this.statusBar = document.createElement('div');
     this.statusBar.className = STATUS_BASE + ' text-slate-500';
@@ -445,6 +451,34 @@ class VerdictEditorElement extends HTMLElement {
     dbWrap.appendChild(this.dbQueryOutput);
     this.dbPanel.appendChild(dbWrap);
     leftPane.appendChild(this.dbPanel);
+
+    this.debugPanel = document.createElement('div');
+    this.debugPanel.className = 'hidden flex-1 min-h-0 overflow-auto bg-[#0b0f1a] p-3';
+    const debugWrap = document.createElement('div');
+    debugWrap.className = 'flex h-full min-h-0 flex-col gap-2';
+    const debugHint = document.createElement('div');
+    debugHint.className = 'text-[11px] text-slate-400';
+    debugHint.textContent = 'Minard-style VM introspection views from compiled bytecode and runtime state.';
+    const bytecodeHeader = sectionHeader('FinVM Bytecode', 'JSON');
+    const bytecodeContainer = document.createElement('div');
+    bytecodeContainer.className = 'h-[220px] shrink-0 rounded border border-slate-800 overflow-hidden';
+    const vmHeader = sectionHeader('VM State Snapshot', 'runJsonProgram');
+    this.vmStatePanel = document.createElement('div');
+    this.vmStatePanel.className = 'h-[220px] shrink-0 overflow-auto rounded border border-slate-800 bg-slate-950 p-3 font-mono text-xs leading-relaxed text-slate-300';
+    this.vmStatePanel.innerHTML = '<div class="text-slate-600 italic">Run program to inspect state.</div>';
+    const vizHeader = sectionHeader('Minard Views', 'Structure / Flow / Density');
+    this.debugVizPanel = document.createElement('div');
+    this.debugVizPanel.className = 'min-h-[220px] flex-1 overflow-auto rounded border border-slate-800 bg-slate-950 p-3';
+    this.debugVizPanel.innerHTML = '<div class="text-slate-600 italic text-xs">Compile and run to render visualizations.</div>';
+    debugWrap.appendChild(debugHint);
+    debugWrap.appendChild(bytecodeHeader);
+    debugWrap.appendChild(bytecodeContainer);
+    debugWrap.appendChild(vmHeader);
+    debugWrap.appendChild(this.vmStatePanel);
+    debugWrap.appendChild(vizHeader);
+    debugWrap.appendChild(this.debugVizPanel);
+    this.debugPanel.appendChild(debugWrap);
+    leftPane.appendChild(this.debugPanel);
     leftPane.appendChild(this.statusBar);
 
     const rightPanel = document.createElement('div');
@@ -465,6 +499,25 @@ class VerdictEditorElement extends HTMLElement {
 
     toolbar.appendChild(toolbarLabel);
     toolbar.appendChild(toolbarActions);
+
+    // Runtime busy/progress strip is debug-only. Main editor should stay clean.
+    if (this.isDebugView()) {
+      this.loadingWrap = document.createElement('div');
+      this.loadingWrap.className = 'hidden border-b border-slate-800 bg-slate-950/70 px-3 py-1.5';
+      this.loadingLabel = document.createElement('div');
+      this.loadingLabel.className = 'mb-1 text-[10px] font-mono text-slate-400';
+      this.loadingLabel.textContent = 'Loading...';
+      const loadingTrack = document.createElement('div');
+      loadingTrack.className = 'h-1.5 w-full overflow-hidden rounded bg-slate-800';
+      const loadingFill = document.createElement('div');
+      loadingFill.className = 'h-full w-full animate-pulse bg-gradient-to-r from-indigo-500 via-sky-400 to-indigo-500';
+      loadingTrack.appendChild(loadingFill);
+      this.loadingWrap.appendChild(this.loadingLabel);
+      this.loadingWrap.appendChild(loadingTrack);
+    } else {
+      this.loadingWrap = null;
+      this.loadingLabel = null;
+    }
 
     const startStopRow = document.createElement('div');
     startStopRow.className = 'flex items-center gap-2 px-3 py-2 border-b border-slate-800 bg-slate-950/70';
@@ -571,27 +624,13 @@ class VerdictEditorElement extends HTMLElement {
     this.inputsPanel.appendChild(inputsWrap);
 
     rightPanel.appendChild(toolbar);
+    if (this.loadingWrap) {
+      rightPanel.appendChild(this.loadingWrap);
+    }
     rightPanel.appendChild(startStopRow);
     rightPanel.appendChild(tabBar);
     rightPanel.appendChild(this.outputPanel);
     rightPanel.appendChild(this.inputsPanel);
-
-    let bytecodeContainer: HTMLDivElement | null = null;
-    if (this.isDebugView()) {
-      const debugHeader = sectionHeader('FinVM Bytecode', 'read-only');
-      bytecodeContainer = document.createElement('div');
-      bytecodeContainer.className = 'h-[220px] shrink-0';
-
-      const vmHeader = sectionHeader('VM State', 'runJsonProgram');
-      this.vmStatePanel = document.createElement('div');
-      this.vmStatePanel.className = 'h-[220px] shrink-0 overflow-auto border-t border-slate-800 bg-[#0b0f1a] p-3 font-mono text-xs leading-relaxed text-slate-300';
-      this.vmStatePanel.innerHTML = '<div class="text-slate-600 italic">Run in Debug to inspect FinVM state.</div>';
-
-      rightPanel.appendChild(debugHeader);
-      rightPanel.appendChild(bytecodeContainer);
-      rightPanel.appendChild(vmHeader);
-      rightPanel.appendChild(this.vmStatePanel);
-    }
 
     const resizeHandle = document.createElement('div');
     resizeHandle.className = 'w-1.5 shrink-0 cursor-col-resize bg-slate-900/70 hover:bg-indigo-500/60 transition-colors';
@@ -608,23 +647,19 @@ class VerdictEditorElement extends HTMLElement {
     }
     defineVerdictTheme();
 
-    if (bytecodeContainer) {
-      this.bytecodeEditor = monaco.editor.create(bytecodeContainer, {
-        value: '',
-        language: 'finvm-bytecode',
-        theme: 'verdict-dark',
-        readOnly: true,
-        minimap: { enabled: false },
-        automaticLayout: true,
-        fontSize: 12,
-        fontFamily: FONT_MONO,
-        lineNumbers: 'off',
-        scrollBeyondLastLine: false,
-        renderLineHighlight: 'none',
-      });
-    } else {
-      this.bytecodeEditor = null;
-    }
+    this.bytecodeEditor = monaco.editor.create(bytecodeContainer, {
+      value: '',
+      language: 'finvm-bytecode',
+      theme: 'verdict-dark',
+      readOnly: true,
+      minimap: { enabled: false },
+      automaticLayout: true,
+      fontSize: 12,
+      fontFamily: FONT_MONO,
+      lineNumbers: 'off',
+      scrollBeyondLastLine: false,
+      renderLineHighlight: 'none',
+    });
 
     this.editor = monaco.editor.create(this.container, {
       value: [
@@ -684,11 +719,16 @@ class VerdictEditorElement extends HTMLElement {
     // The first diagnostics/results pass needs the compiler — wait for it, then
     // run. (runDiagnostics/runInlineResults no-op until vlib is set anyway.)
     this.statusBar.textContent = 'Loading compiler…';
-    await loadVerdictLibs();
+    this.beginBusy('Loading compiler and VM...');
+    try {
+      await loadVerdictLibs();
+    } finally {
+      this.endBusy();
+    }
     this.addInputField('signalBias', '0');
     this.refreshInputsPreview();
     this.refreshDbQueryOutput();
-    this.setActiveMainTab('editor');
+    this.setActiveMainTab(this.isDebugView() ? 'debug' : 'editor');
     this.setActiveSideTab('output');
     this.runDiagnostics();
     this.runInlineResults();
@@ -713,11 +753,14 @@ class VerdictEditorElement extends HTMLElement {
     });
   }
 
-  private setActiveMainTab(tab: 'editor' | 'db') {
+  private setActiveMainTab(tab: 'editor' | 'db' | 'debug') {
     this.activeMainTab = tab;
     this.container.classList.toggle('hidden', tab !== 'editor');
     if (this.dbPanel) {
       this.dbPanel.classList.toggle('hidden', tab !== 'db');
+    }
+    if (this.debugPanel) {
+      this.debugPanel.classList.toggle('hidden', tab !== 'debug');
     }
     const tabButtons = this.mainContainer.querySelectorAll<HTMLButtonElement>('[data-main-tab-id]');
     tabButtons.forEach((btn) => {
@@ -726,6 +769,23 @@ class VerdictEditorElement extends HTMLElement {
         ? 'rounded bg-indigo-600/30 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-indigo-200 ring-1 ring-inset ring-indigo-400/40'
         : 'rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 hover:text-white';
     });
+  }
+
+  private beginBusy(message: string) {
+    this.busyCount += 1;
+    if (this.loadingLabel) {
+      this.loadingLabel.textContent = message;
+    }
+    if (this.loadingWrap) {
+      this.loadingWrap.classList.remove('hidden');
+    }
+  }
+
+  private endBusy() {
+    this.busyCount = Math.max(0, this.busyCount - 1);
+    if (this.busyCount === 0 && this.loadingWrap) {
+      this.loadingWrap.classList.add('hidden');
+    }
   }
 
   // Debounce edits into a single background pass ~250ms after typing stops.
@@ -844,6 +904,7 @@ class VerdictEditorElement extends HTMLElement {
 
   run() {
     if (!this.editor) return;
+    this.beginBusy('Compiling and running...');
     const code = this.materializeLiveCode(this.editor.getValue(), this.latestPriceCents, this.latestMovingAverageCents);
     this.renderOutput('Compiling', 'info');
     
@@ -865,22 +926,31 @@ class VerdictEditorElement extends HTMLElement {
       const compilation = vlib.compileJS(code);
       if (!compilation.ok) {
         this.bytecodeEditor?.setValue('');
+        this.latestCompiledProgram = null;
         if (this.vmStatePanel) {
           this.vmStatePanel.innerHTML = '<div class="text-slate-600 italic">Compilation failed, VM state unavailable.</div>';
         }
+        this.renderDebugVisualizations();
         this.renderOutput(`Compilation Error: ${compilation.error}`, 'error');
         return;
       }
       this.bytecodeEditor?.setValue(compilation.output);
+      try {
+        this.latestCompiledProgram = JSON.parse(compilation.output);
+      } catch {
+        this.latestCompiledProgram = null;
+      }
+      this.renderDebugVisualizations();
       const vmOut = this.runFinvmProgram(compilation.output, true);
       if (vmOut.ok) {
         this.renderOutput(vmOut.resultText, 'ok');
       } else {
         this.renderOutput(`Runtime Error: ${vmOut.error}`, 'error');
       }
-      this.setActiveSideTab('output');
     } catch (e) {
       this.renderOutput(`Internal Error: ${String(e)}`, 'error');
+    } finally {
+      this.endBusy();
     }
   }
 
@@ -917,6 +987,102 @@ class VerdictEditorElement extends HTMLElement {
   private renderVmState(snapshot: unknown) {
     if (!this.vmStatePanel) return;
     this.vmStatePanel.innerHTML = `<pre class="whitespace-pre-wrap break-words text-slate-300">${renderJsonForPanel(snapshot)}</pre>`;
+    this.latestVmSnapshot = snapshot;
+    this.renderDebugVisualizations();
+  }
+
+  private renderDebugVisualizations() {
+    if (!this.debugVizPanel) return;
+    const program = this.latestCompiledProgram;
+    const snapshot = this.latestVmSnapshot;
+    if (!program && !snapshot) {
+      this.debugVizPanel.innerHTML = '<div class="text-slate-600 italic text-xs">Compile and run to render visualizations.</div>';
+      return;
+    }
+
+    const kindCounts = new Map<string, number>();
+    const depthCounts: number[] = [];
+    const walk = (value: unknown, depth: number) => {
+      depthCounts[depth] = (depthCounts[depth] ?? 0) + 1;
+      if (value === null) {
+        kindCounts.set('null', (kindCounts.get('null') ?? 0) + 1);
+        return;
+      }
+      if (Array.isArray(value)) {
+        kindCounts.set('array', (kindCounts.get('array') ?? 0) + 1);
+        for (const v of value) walk(v, depth + 1);
+        return;
+      }
+      if (typeof value === 'object') {
+        const rec = value as Record<string, unknown>;
+        const typeLabel =
+          (typeof rec.op === 'string' && rec.op) ||
+          (typeof rec.tag === 'string' && rec.tag) ||
+          (typeof rec.kind === 'string' && rec.kind) ||
+          'object';
+        kindCounts.set(typeLabel, (kindCounts.get(typeLabel) ?? 0) + 1);
+        for (const v of Object.values(rec)) walk(v, depth + 1);
+        return;
+      }
+      kindCounts.set(typeof value, (kindCounts.get(typeof value) ?? 0) + 1);
+    };
+
+    if (program) walk(program, 0);
+    if (snapshot) walk(snapshot, 0);
+
+    const topKinds = [...kindCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10);
+    const maxKind = Math.max(1, ...topKinds.map(([, n]) => n));
+    const maxDepth = Math.max(1, ...depthCounts);
+
+    const kindRows = topKinds
+      .map(([label, count]) => {
+        const pct = Math.max(3, Math.round((count / maxKind) * 100));
+        return `
+          <div class="mb-1.5">
+            <div class="mb-0.5 flex items-center justify-between text-[10px] font-mono text-slate-400">
+              <span>${escapeHtml(label)}</span><span>${count}</span>
+            </div>
+            <div class="h-2 rounded bg-slate-800"><div class="h-full rounded bg-indigo-400/80" style="width:${pct}%"></div></div>
+          </div>
+        `;
+      })
+      .join('');
+
+    const depthBars = depthCounts
+      .slice(0, 18)
+      .map((count, idx) => {
+        const h = Math.max(8, Math.round((count / maxDepth) * 88));
+        return `<div class="flex w-5 flex-col items-center gap-1"><div class="w-4 rounded-t bg-sky-400/80" style="height:${h}px"></div><div class="text-[9px] text-slate-500">${idx}</div></div>`;
+      })
+      .join('');
+
+    const tables = extractDbTables(
+      snapshot && typeof snapshot === 'object' ? (snapshot as Record<string, unknown>) : {},
+    );
+    const tableRows = Object.entries(tables)
+      .sort((a, b) => b[1].length - a[1].length)
+      .slice(0, 8)
+      .map(([name, rows]) => `<div class="flex items-center justify-between border-b border-slate-800/70 py-1 text-xs"><span class="text-slate-300">${escapeHtml(name)}</span><span class="font-mono text-emerald-300">${rows.length}</span></div>`)
+      .join('');
+
+    this.debugVizPanel.innerHTML = `
+      <div class="grid grid-cols-1 gap-3 xl:grid-cols-3">
+        <div class="rounded border border-slate-800 bg-slate-900/60 p-2">
+          <div class="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500">Minard View: Opcode / Node Mix</div>
+          ${kindRows || '<div class="text-xs text-slate-500">No nodes</div>'}
+        </div>
+        <div class="rounded border border-slate-800 bg-slate-900/60 p-2">
+          <div class="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500">Minard View: Layer Depth Profile</div>
+          <div class="flex items-end gap-1 overflow-x-auto pb-1" style="min-height:110px">${depthBars || '<div class="text-xs text-slate-500">No depth data</div>'}</div>
+        </div>
+        <div class="rounded border border-slate-800 bg-slate-900/60 p-2">
+          <div class="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500">Minard View: DB Density</div>
+          ${tableRows || '<div class="text-xs text-slate-500">No DB tables in VM state</div>'}
+        </div>
+      </div>
+    `;
   }
 
   private runFinvmProgram(programJson: string, persistState: boolean): { ok: true; resultText: string; steps: number } | { ok: false; error: string } {
@@ -1101,6 +1267,7 @@ class VerdictEditorElement extends HTMLElement {
   private async runLiveTick() {
     if (this.tickInFlight || !this.editor) return;
     this.tickInFlight = true;
+    this.beginBusy('Fetching market data...');
     try {
       const symbol = this.currentSymbol();
       const priceCents = await this.fetchBinancePriceCents(symbol);
@@ -1114,10 +1281,18 @@ class VerdictEditorElement extends HTMLElement {
       const source = this.materializeLiveCode(this.editor.getValue(), this.latestPriceCents, this.latestMovingAverageCents);
       const compilation = vlib.compileJS(source);
       if (!compilation.ok) {
+        this.latestCompiledProgram = null;
+        this.renderDebugVisualizations();
         this.renderOutput(`Compilation Error: ${compilation.error}`, 'error');
         return;
       }
       this.bytecodeEditor?.setValue(compilation.output);
+      try {
+        this.latestCompiledProgram = JSON.parse(compilation.output);
+      } catch {
+        this.latestCompiledProgram = null;
+      }
+      this.renderDebugVisualizations();
       const vmOut = this.runFinvmProgram(compilation.output, true);
       if (!vmOut.ok) {
         this.renderOutput(`Runtime Error: ${vmOut.error}`, 'error');
@@ -1130,11 +1305,11 @@ class VerdictEditorElement extends HTMLElement {
         `Live Tick #${this.liveTickCount} (${symbol})\nprice=${priceText} ma=${maText} samples=${this.marketHistoryCents.length}\nresult=${vmOut.resultText}\nsteps=${vmOut.steps}`,
         'ok',
       );
-      this.setActiveSideTab('output');
     } catch (e) {
       this.renderOutput(`Live Tick Error: ${String(e)}`, 'error');
     } finally {
       this.tickInFlight = false;
+      this.endBusy();
     }
   }
 

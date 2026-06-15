@@ -19,7 +19,19 @@ export default defineConfig({
     // as hundreds of individual ESM modules, so a cold load is hundreds of HTTP
     // round-trips (several seconds). Bundling collapses that to a handful of
     // requests; the result is cached in node_modules/.vite.
-    include: ["monaco-editor/esm/vs/editor/edcore.main"],
+    include: ["monaco-editor/esm/vs/editor/editor.api"],
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules/monaco-editor/esm/")) return;
+          // Keep Monaco in one chunk to avoid runtime TDZ/circular init issues
+          // caused by aggressive cross-chunk splitting.
+          return "monaco-editor";
+        },
+      },
+    },
   },
   worker: {
     format: "es",

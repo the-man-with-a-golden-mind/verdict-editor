@@ -7,10 +7,10 @@
     "build": "vite build",
     "dev": "vite",
     "preview": "vite preview",
-    "cf:whoami": "npx --yes wrangler@latest whoami",
-    "cf:deploy": "npm run build && npx --yes wrangler@latest pages deploy dist",
-    "cf:deploy:prod": "npm run build && npx --yes wrangler@latest pages deploy dist --branch main",
-    "cf:pages:create": "npx --yes wrangler@latest pages project create fin-editor"
+    "cf:whoami": "bunx wrangler whoami",
+    "cf:dev": "bunx wrangler dev",
+    "cf:deploy": "npm run build && bunx wrangler deploy",
+    "cf:tail": "bunx wrangler tail"
   },
   "dependencies": {
     "big-integer": "^1.6.52",
