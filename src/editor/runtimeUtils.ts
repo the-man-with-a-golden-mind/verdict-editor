@@ -40,11 +40,19 @@ export function toVerdictLiteral(value: unknown): string {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return String(Math.trunc(value));
   }
+  if (typeof value === 'boolean') {
+    return value ? 'True' : 'False';
+  }
   if (typeof value === 'string') {
     return JSON.stringify(value);
   }
   if (Array.isArray(value)) {
     return `[${value.map((v) => toVerdictLiteral(v)).join(', ')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .map(([k, v]) => `${k} = ${toVerdictLiteral(v)}`);
+    return `{ ${entries.join(', ')} }`;
   }
   return '0';
 }
@@ -52,7 +60,23 @@ export function toVerdictLiteral(value: unknown): string {
 type DbRow = { id: string; value: unknown };
 type DbTables = Record<string, DbRow[]>;
 
-export function extractDbTables(state: Record<string, unknown>): DbTables {
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+}
+
+function resolveFinvmState(input: unknown): Record<string, unknown> {
+  const top = asRecord(input);
+  if ('__finvm.db' in top) return top;
+  const nestedState = asRecord(top.state);
+  if ('__finvm.db' in nestedState) return nestedState;
+  const vm = asRecord(top.vm);
+  const vmState = asRecord(vm.state);
+  if ('__finvm.db' in vmState) return vmState;
+  return top;
+}
+
+export function extractDbTables(input: unknown): DbTables {
+  const state = resolveFinvmState(input);
   const root = state['__finvm.db'];
   if (!root || typeof root !== 'object') return {};
   const tablesRecord = ((root as Record<string, unknown>).record ?? {}) as Record<string, unknown>;

@@ -6,15 +6,28 @@ import 'monaco-editor/esm/vs/editor/contrib/suggest/browser/suggest.js';
 import 'monaco-editor/esm/vs/editor/contrib/bracketMatching/browser/bracketMatching.js';
 import 'monaco-editor/esm/vs/editor/contrib/find/browser/findController.js';
 import {
+  createEffectStorage,
+  createFinvmHandlers,
+  effectDbTablesToFinvmState,
+  runProgramWithEffects,
+  type EffectStorage,
+} from './editor/effectDriver';
+import {
   escapeHtml,
   extractDbTables,
   formatVmValue,
-  parseRunJsonProgram,
   renderJsonForPanel,
   runDbQuery,
   toVerdictLiteral,
-  type RunJsonProgramResult,
 } from './editor/runtimeUtils';
+
+declare global {
+  interface Window {
+    TypeSigRenderer?: {
+      renderSignature: (name: string, sig: string, ast: unknown, options?: { className?: string }) => SVGElement;
+    };
+  }
+}
 
 // Wire up Monaco's base editor worker via Vite's native `?worker` import.
 // Without this, Monaco requests a worker from an undefined URL (the
@@ -331,6 +344,9 @@ class VerdictEditorElement extends HTMLElement {
   private dbPanel: HTMLDivElement | null = null;
   private debugPanel: HTMLDivElement | null = null;
   private debugVizPanel: HTMLDivElement | null = null;
+  private vmObserverPanel: HTMLDivElement | null = null;
+  private vmDbPanel: HTMLDivElement | null = null;
+  private codeVisPanel: HTMLDivElement | null = null;
   private inputsPreview: HTMLDivElement | null = null;
   private inputsList: HTMLDivElement | null = null;
   private dbQueryInput: HTMLInputElement | null = null;
@@ -345,6 +361,11 @@ class VerdictEditorElement extends HTMLElement {
   private statusBar!: HTMLDivElement;
   private intervalInput: HTMLInputElement | null = null;
   private symbolInput: HTMLInputElement | null = null;
+  private assetsCsvInput: HTMLInputElement | null = null;
+  private signalThresholdInput: HTMLInputElement | null = null;
+  private positionBiasInput: HTMLInputElement | null = null;
+  private telegramBotTokenInput: HTMLInputElement | null = null;
+  private telegramChatIdInput: HTMLInputElement | null = null;
   private runToggleBtn: HTMLButtonElement | null = null;
   private diagnosticsTimer: number | null = null;
   private pollTimer: number | null = null;
@@ -353,12 +374,14 @@ class VerdictEditorElement extends HTMLElement {
   private liveTickCount = 0;
   private busyCount = 0;
   private finvmState: Record<string, unknown> = {};
-  private marketHistoryCents: number[] = [];
-  private latestPriceCents = 0;
-  private latestMovingAverageCents = 0;
+  private effectStorage: EffectStorage | null = null;
   private resultDecorations: monaco.editor.IEditorDecorationsCollection | null = null;
   private latestCompiledProgram: unknown = null;
   private latestVmSnapshot: unknown = null;
+  private lastVmSteps = 0;
+  private vmMetricsHistory: Array<{ memoryBytes: number; load: number; tables: number; rows: number; regs: number; threshold: number }> = [];
+  private minardLoaded = false;
+  private minardLoading: Promise<boolean> | null = null;
   private built = false;
 
   protected isDebugView(): boolean {
@@ -458,27 +481,40 @@ class VerdictEditorElement extends HTMLElement {
     debugWrap.className = 'flex h-full min-h-0 flex-col gap-2';
     const debugHint = document.createElement('div');
     debugHint.className = 'text-[11px] text-slate-400';
-    debugHint.textContent = 'Minard-style VM introspection views from compiled bytecode and runtime state.';
-    const bytecodeHeader = sectionHeader('FinVM Bytecode', 'JSON');
+    debugHint.textContent = 'VM debug data only (state, bytecode, and DB). Visualizations removed.';
     const bytecodeContainer = document.createElement('div');
-    bytecodeContainer.className = 'h-[220px] shrink-0 rounded border border-slate-800 overflow-hidden';
-    const vmHeader = sectionHeader('VM State Snapshot', 'runJsonProgram');
+    bytecodeContainer.className = 'h-[220px] min-h-[220px] rounded border border-slate-800 overflow-hidden';
     this.vmStatePanel = document.createElement('div');
-    this.vmStatePanel.className = 'h-[220px] shrink-0 overflow-auto rounded border border-slate-800 bg-slate-950 p-3 font-mono text-xs leading-relaxed text-slate-300';
+    this.vmStatePanel.className = 'h-[220px] min-h-[220px] overflow-auto rounded border border-slate-800 bg-slate-950 p-3 font-mono text-xs leading-relaxed text-slate-300';
     this.vmStatePanel.innerHTML = '<div class="text-slate-600 italic">Run program to inspect state.</div>';
-    const vizHeader = sectionHeader('Minard Views', 'Structure / Flow / Density');
-    this.debugVizPanel = document.createElement('div');
-    this.debugVizPanel.className = 'min-h-[220px] flex-1 overflow-auto rounded border border-slate-800 bg-slate-950 p-3';
-    this.debugVizPanel.innerHTML = '<div class="text-slate-600 italic text-xs">Compile and run to render visualizations.</div>';
+    this.vmDbPanel = document.createElement('div');
+    this.vmDbPanel.className = 'h-[180px] min-h-[180px] overflow-auto rounded border border-slate-800 bg-slate-950 p-3 font-mono text-xs leading-relaxed text-slate-300';
+    this.vmDbPanel.innerHTML = '<div class="text-slate-600 italic">Run program to inspect VM DB tables.</div>';
+    this.vmObserverPanel = null;
+    this.debugVizPanel = null;
+
+    const mkAccordion = (title: string, subtitle: string, body: HTMLElement, open = false) => {
+      const details = document.createElement('details');
+      details.className = 'rounded border border-slate-800 bg-slate-950/50';
+      details.open = open;
+      const summary = document.createElement('summary');
+      summary.className = 'cursor-pointer list-none select-none px-3 py-2';
+      summary.innerHTML = `<div class="flex items-center justify-between"><span class="text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">${escapeHtml(title)}</span><span class="text-[10px] font-mono text-slate-600">${escapeHtml(subtitle)}</span></div>`;
+      details.appendChild(summary);
+      const bodyWrap = document.createElement('div');
+      bodyWrap.className = 'px-3 pb-3';
+      bodyWrap.appendChild(body);
+      details.appendChild(bodyWrap);
+      return details;
+    };
+
     debugWrap.appendChild(debugHint);
-    debugWrap.appendChild(bytecodeHeader);
-    debugWrap.appendChild(bytecodeContainer);
-    debugWrap.appendChild(vmHeader);
-    debugWrap.appendChild(this.vmStatePanel);
-    debugWrap.appendChild(vizHeader);
-    debugWrap.appendChild(this.debugVizPanel);
+    debugWrap.appendChild(mkAccordion('FinVM Bytecode', 'JSON', bytecodeContainer, true));
+    debugWrap.appendChild(mkAccordion('VM State Snapshot', 'runJsonProgram', this.vmStatePanel, true));
+    debugWrap.appendChild(mkAccordion('VM DB', 'tables / rows', this.vmDbPanel, false));
     this.debugPanel.appendChild(debugWrap);
     leftPane.appendChild(this.debugPanel);
+    this.codeVisPanel = null;
     leftPane.appendChild(this.statusBar);
 
     const rightPanel = document.createElement('div');
@@ -590,10 +626,53 @@ class VerdictEditorElement extends HTMLElement {
       this.runDiagnostics();
       this.runInlineResults();
     };
+    this.assetsCsvInput = document.createElement('input');
+    this.assetsCsvInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
+    this.assetsCsvInput.value = 'BTCUSD,ETHUSD,ADAUSD';
+    this.assetsCsvInput.setAttribute('aria-label', 'Assets CSV');
+    this.assetsCsvInput.oninput = () => {
+      this.refreshInputsPreview();
+      this.runDiagnostics();
+      this.runInlineResults();
+    };
+    this.signalThresholdInput = document.createElement('input');
+    this.signalThresholdInput.type = 'number';
+    this.signalThresholdInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
+    this.signalThresholdInput.value = '2';
+    this.signalThresholdInput.setAttribute('aria-label', 'Signal threshold');
+    this.signalThresholdInput.oninput = this.assetsCsvInput.oninput;
+    this.positionBiasInput = document.createElement('input');
+    this.positionBiasInput.type = 'number';
+    this.positionBiasInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
+    this.positionBiasInput.value = '0';
+    this.positionBiasInput.setAttribute('aria-label', 'Position bias');
+    this.positionBiasInput.oninput = this.assetsCsvInput.oninput;
+    this.telegramBotTokenInput = document.createElement('input');
+    this.telegramBotTokenInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
+    this.telegramBotTokenInput.value = '';
+    this.telegramBotTokenInput.placeholder = '123456:ABC...';
+    this.telegramBotTokenInput.setAttribute('aria-label', 'Telegram bot token');
+    this.telegramBotTokenInput.oninput = this.assetsCsvInput.oninput;
+    this.telegramChatIdInput = document.createElement('input');
+    this.telegramChatIdInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
+    this.telegramChatIdInput.value = '';
+    this.telegramChatIdInput.placeholder = '-100123456789';
+    this.telegramChatIdInput.setAttribute('aria-label', 'Telegram chat id');
+    this.telegramChatIdInput.oninput = this.assetsCsvInput.oninput;
     fixedInputs.appendChild(mkLabel('symbol'));
     fixedInputs.appendChild(this.symbolInput);
     fixedInputs.appendChild(mkLabel('intervalSec'));
     fixedInputs.appendChild(this.intervalInput);
+    fixedInputs.appendChild(mkLabel('assetsCsv'));
+    fixedInputs.appendChild(this.assetsCsvInput);
+    fixedInputs.appendChild(mkLabel('signalThreshold'));
+    fixedInputs.appendChild(this.signalThresholdInput);
+    fixedInputs.appendChild(mkLabel('positionBias'));
+    fixedInputs.appendChild(this.positionBiasInput);
+    fixedInputs.appendChild(mkLabel('telegramBotToken'));
+    fixedInputs.appendChild(this.telegramBotTokenInput);
+    fixedInputs.appendChild(mkLabel('telegramChatId'));
+    fixedInputs.appendChild(this.telegramChatIdInput);
 
     const dynamicInputs = document.createElement('div');
     dynamicInputs.className = 'rounded border border-slate-800 bg-slate-950 p-2';
@@ -665,31 +744,304 @@ class VerdictEditorElement extends HTMLElement {
       value: [
         'module Main exposing (main)',
         '',
-        '-- Host loop fills these with live Binance data every tick.',
-        '-- Press Start to poll, Stop to halt, or Run for one local pass.',
-        'livePrice : Int',
-        'livePrice = __LIVE_PRICE__',
+        '-- Market data: fetched from Binance in THIS code via httpGet.',
+        '-- The editor only runs the VM and fulfils http/db/cache effects.',
+        '-- All statistics below are computed in pure Verdict (the bundled runtime',
+        '-- ships str/logic/bigint builtins; the rich stats/series builtins in the',
+        '-- prelude are not linked into this VM, so we derive them from first',
+        '-- principles with foldl + integer math).',
         '',
-        'movingAverage : Int',
-        'movingAverage = __LIVE_MA__',
+        'binanceSymbol : String -> String',
+        'binanceSymbol sym =',
+        '  if sym == "BTCUSD" then "BTCUSDT"',
+        '  else if sym == "ETHUSD" then "ETHUSDT"',
+        '  else if sym == "ADAUSD" then "ADAUSDT"',
+        '  else sym',
         '',
-        '-- Optional input token from Inputs tab JSON.',
-        'signalBias : Int',
-        'signalBias = __INPUT_signalBias__',
+        'binancePriceUrl : String -> String',
+        'binancePriceUrl sym =',
+        '  strConcat("https://api.binance.com/api/v3/ticker/price?symbol=", binanceSymbol(sym))',
         '',
-        '-- Price values are integer cents.',
-        '-- We persist each tick to FinVM DB and return a compact decision string.',
-        'signalFor : Int -> Int -> String',
-        'signalFor price avg =',
-        '  if price > avg + signalBias then "BUY"',
-        '  else if price < avg - signalBias then "SELL"',
+        'dollarsToCents : String -> Int',
+        'dollarsToCents px =',
+        '  let parts = split(px, ".") in',
+        '  let whole = withDefault(0, parseInt(withDefault("0", head(parts)))) in',
+        '  let fracRaw = withDefault("0", head(drop(1, parts))) in',
+        '  let frac = strSlice(fracRaw, 0, 2) in',
+        '  let fracPad = if strLength(frac) < 2 then strConcat(frac, "0") else frac in',
+        '  whole * 100 + withDefault(0, parseInt(fracPad))',
+        '',
+        '-- FinVM ships str.* builtins but no json.* builtins, so we pull the quoted',
+        '-- "price" field out of the flat JSON body with string ops.',
+        'jsonStringField : String -> String -> String',
+        'jsonStringField key body =',
+        '  let marker = strConcat("\\"", strConcat(key, "\\":\\"")) in',
+        '  let afterKey = split(body, marker) in',
+        '  if length(afterKey) < 2 then ""',
+        '  else',
+        '    let rest = withDefault("", head(drop(1, afterKey))) in',
+        '    withDefault("", head(split(rest, "\\"")))',
+        '',
+        'priceCentsFromBody : String -> Int',
+        'priceCentsFromBody body = dollarsToCents(jsonStringField("price", body))',
+        '',
+        'fetchPriceCents : String -> Int',
+        'fetchPriceCents sym =',
+        '  let res = httpGet(binancePriceUrl(sym)) in',
+        '  if res.ok then priceCentsFromBody(res.body) else 0',
+        '',
+        'histKey : String -> String',
+        'histKey sym = strConcat("hist:", sym)',
+        '',
+        '-- cacheGet returns unit on a miss; the stored value is the raw CSV string.',
+        'histCsvOrEmpty : String -> String',
+        'histCsvOrEmpty sym =',
+        '  let raw = cacheGet("market", histKey(sym)) in',
+        '  if raw == unit then "" else raw',
+        '',
+        'appendHistCsv : String -> Int -> String',
+        'appendHistCsv csv px =',
+        '  if strLength(csv) == 0 then fromInt(px)',
+        '  else strConcat(csv, strConcat(",", fromInt(px)))',
+        '',
+        'saveHistCsv : String -> String -> Bool',
+        'saveHistCsv sym csv = cacheSet("market", histKey(sym), csv)',
+        '',
+        '-- ── Series parsing & windowing ──────────────────────────────────────────────',
+        'pushParsed : List Int -> String -> List Int',
+        'pushParsed acc s = append(acc, withDefault(0, parseInt(trim(s))))',
+        '',
+        'parseCsvInts : String -> List Int',
+        'parseCsvInts csv = foldl(pushParsed, [], split(csv, ","))',
+        '',
+        'lastN : Int -> List Int -> List Int',
+        'lastN n xs =',
+        '  let len = length(xs) in',
+        '  let dropN = if len > n then len - n else 0 in',
+        '  drop(dropN, xs)',
+        '',
+        'lastInt : List Int -> Int',
+        'lastInt xs = withDefault(0, last(xs))',
+        '',
+        'listMin : List Int -> Int',
+        'listMin xs = foldl(min, withDefault(0, head(xs)), xs)',
+        '',
+        'listMax : List Int -> Int',
+        'listMax xs = foldl(max, withDefault(0, head(xs)), xs)',
+        '',
+        '-- ── Integer square root (Newton\'s method, pure Verdict) ─────────────────────',
+        'isqrtGo : Int -> Int -> Int',
+        'isqrtGo n x =',
+        '  let y = (x + n / x) / 2 in',
+        '  if y < x then isqrtGo(n, y) else x',
+        '',
+        'isqrt : Int -> Int',
+        'isqrt n =',
+        '  if n < 2 then (if n < 0 then 0 else n)',
+        '  else isqrtGo(n, n / 2)',
+        '',
+        '-- ── Mean / variance / standard deviation (single-pass accumulator) ──────────',
+        'accStat : { n : Int, s : Int, ss : Int } -> Int -> { n : Int, s : Int, ss : Int }',
+        'accStat a x = { n = a.n + 1, s = a.s + x, ss = a.ss + x * x }',
+        '',
+        'statsOf : List Int -> { n : Int, s : Int, ss : Int }',
+        'statsOf xs = foldl(accStat, { n = 0, s = 0, ss = 0 }, xs)',
+        '',
+        'meanOf : List Int -> Int',
+        'meanOf xs =',
+        '  let st = statsOf(xs) in',
+        '  if st.n == 0 then 0 else st.s / st.n',
+        '',
+        '-- Population variance: E[x^2] - E[x]^2, clamped at 0 against rounding.',
+        'varianceOf : List Int -> Int',
+        'varianceOf xs =',
+        '  let st = statsOf(xs) in',
+        '  if st.n == 0 then 0',
+        '  else',
+        '    let m = st.s / st.n in',
+        '    let v = st.ss / st.n - m * m in',
+        '    if v < 0 then 0 else v',
+        '',
+        'stddevOf : List Int -> Int',
+        'stddevOf xs = isqrt(varianceOf(xs))',
+        '',
+        '-- z-score in centi-sigma: (price - mean) * 100 / stddev',
+        'zScoreOf : List Int -> Int',
+        'zScoreOf xs =',
+        '  let sd = stddevOf(xs) in',
+        '  if sd == 0 then 0',
+        '  else (lastInt(xs) - meanOf(xs)) * 100 / sd',
+        '',
+        '-- ── Exponential moving average (alpha = 2 / (period + 1)) ───────────────────',
+        'emaAcc : { p : Int, e : Int, seen : Int } -> Int -> { p : Int, e : Int, seen : Int }',
+        'emaAcc a x =',
+        '  if a.seen == 0 then { p = a.p, e = x, seen = 1 }',
+        '  else { p = a.p, e = (x * 2 + a.e * (a.p - 1)) / (a.p + 1), seen = a.seen + 1 }',
+        '',
+        'emaOf : Int -> List Int -> Int',
+        'emaOf period xs =',
+        '  let r = foldl(emaAcc, { p = period, e = 0, seen = 0 }, xs) in',
+        '  r.e',
+        '',
+        '-- ── Linear-regression slope over the window (least squares, cents/step) ─────',
+        'regAcc : { i : Int, sx : Int, sy : Int, sxy : Int, sxx : Int } -> Int -> { i : Int, sx : Int, sy : Int, sxy : Int, sxx : Int }',
+        'regAcc a y =',
+        '  { i = a.i + 1, sx = a.sx + a.i, sy = a.sy + y, sxy = a.sxy + a.i * y, sxx = a.sxx + a.i * a.i }',
+        '',
+        'slopeOf : List Int -> Int',
+        'slopeOf xs =',
+        '  let n = length(xs) in',
+        '  if n < 2 then 0',
+        '  else',
+        '    let r = foldl(regAcc, { i = 0, sx = 0, sy = 0, sxy = 0, sxx = 0 }, xs) in',
+        '    let denom = n * r.sxx - r.sx * r.sx in',
+        '    if denom == 0 then 0 else (n * r.sxy - r.sx * r.sy) / denom',
+        '',
+        '-- range position: where the last price sits within [min,max], as percent 0..100',
+        'rangePosOf : List Int -> Int',
+        'rangePosOf xs =',
+        '  let lo = listMin(xs) in',
+        '  let hi = listMax(xs) in',
+        '  if hi == lo then 50 else (lastInt(xs) - lo) * 100 / (hi - lo)',
+        '',
+        'momentumOf : List Int -> Int',
+        'momentumOf xs =',
+        '  let n = length(xs) in',
+        '  if n < 2 then 0 else lastInt(xs) - xs[n - 2]',
+        '',
+        '-- ── Reporting helpers (str.* only; no json.*) ───────────────────────────────',
+        'appendStr : String -> String -> String',
+        'appendStr acc s = strConcat(acc, s)',
+        '',
+        'joinStr : List String -> String',
+        'joinStr parts = foldl(appendStr, "", parts)',
+        '',
+        '-- Render integer cents as a human dollars string, e.g. 1234567 -> 12345.67',
+        'centsToUsd : Int -> String',
+        'centsToUsd c =',
+        '  let whole = c / 100 in',
+        '  let frac = c - whole * 100 in',
+        '  let fracStr = if frac < 10 then strConcat("0", fromInt(frac)) else fromInt(frac) in',
+        '  strConcat(fromInt(whole), strConcat(".", fracStr))',
+        '',
+        '-- Render a signed hundredths value (z-score sigma) like -1.50 / 2.30',
+        'signedCentis : Int -> String',
+        'signedCentis c =',
+        '  if c < 0 then strConcat("-", centsToUsd(0 - c)) else centsToUsd(c)',
+        '',
+        '-- ── Signal scoring: blends trend, mean-reversion and momentum ───────────────',
+        'scoreOf : Int -> Int -> Int -> Int -> Int -> Int -> Int',
+        'scoreOf z emaFast emaSlow slope mom bias =',
+        '  let cross = emaFast - emaSlow in',
+        '  let trend = if cross > 0 then 2 else if cross < 0 then (0 - 2) else 0 in',
+        '  let slopeSig = if slope > 0 then 1 else if slope < 0 then (0 - 1) else 0 in',
+        '  let revert = if z < (0 - 150) then 2 else if z > 150 then (0 - 2) else 0 in',
+        '  let accel = if mom > 0 then 1 else if mom < 0 then (0 - 1) else 0 in',
+        '  trend + slopeSig + revert + accel + bias',
+        '',
+        'decisionFromScore : Int -> Int -> String',
+        'decisionFromScore s threshold =',
+        '  if s > threshold then "BUY"',
+        '  else if s == threshold then "BUY"',
+        '  else if s < (0 - threshold) then "SELL"',
+        '  else if s == (0 - threshold) then "SELL"',
         '  else "HOLD"',
+        '',
+        'notifyTelegram : String -> String -> String -> String',
+        'notifyTelegram token chatId text =',
+        '  if strLength(token) < 10 then "telegram:skip(no token)"',
+        '  else if strLength(chatId) < 3 then "telegram:skip(no chat)"',
+        '  else httpPost(',
+        '    strConcat("https://api.telegram.org/bot", strConcat(token, "/sendMessage")),',
+        '    text',
+        '  ).body',
+        '',
+        '-- Compute every statistic for one asset window and fold into a decision row.',
+        'decisionForAsset : Int -> Int -> String -> List Int -> Json',
+        'decisionForAsset threshold bias sym window =',
+        '  let px = lastInt(window) in',
+        '  let mean = meanOf(window) in',
+        '  let sd = stddevOf(window) in',
+        '  let z = zScoreOf(window) in',
+        '  let emaFast = emaOf(5, window) in',
+        '  let emaSlow = emaOf(20, window) in',
+        '  let slope = slopeOf(window) in',
+        '  let rangePos = rangePosOf(window) in',
+        '  let mom = momentumOf(window) in',
+        '  let sc = scoreOf(z, emaFast, emaSlow, slope, mom, bias) in',
+        '  let d = decisionFromScore(sc, threshold) in',
+        '  { symbol = sym, decision = d, score = sc, priceCents = px,',
+        '    mean = mean, stddev = sd, zscore = z, emaFast = emaFast, emaSlow = emaSlow,',
+        '    slope = slope, rangePos = rangePos, momentum = mom, samples = length(window) }',
+        '',
+        '-- Human-readable justification for a decision, comparing score vs threshold.',
+        'explainDecision : Int -> Int -> String -> String',
+        'explainDecision s threshold d =',
+        '  if d == "BUY" then joinStr(["score ", fromInt(s), " >= threshold ", fromInt(threshold), " => BUY"])',
+        '  else if d == "SELL" then joinStr(["score ", fromInt(s), " <= -threshold ", fromInt(threshold), " => SELL"])',
+        '  else joinStr(["score ", fromInt(s), " within +/-", fromInt(threshold), " => HOLD"])',
+        '',
+        '-- Build the multi-line detail block shown in Output, one per asset. The editor',
+        '-- only prints whatever this returns; all reasoning lives here.',
+        'assetDetail : Json -> Int -> String -> String -> String',
+        'assetDetail row threshold savedId alertStatus =',
+        '  joinStr([',
+        '    "* ", row.symbol, "  ", row.decision,',
+        '    "\\n    price      $", centsToUsd(row.priceCents),',
+        '    "\\n    samples    ", fromInt(row.samples),',
+        '    "\\n    mean       $", centsToUsd(row.mean),',
+        '    "\\n    std dev    $", centsToUsd(row.stddev),',
+        '    "\\n    z-score    ", signedCentis(row.zscore), " sigma",',
+        '    "\\n    EMA(5)     $", centsToUsd(row.emaFast),',
+        '    "\\n    EMA(20)    $", centsToUsd(row.emaSlow),',
+        '    "\\n    slope      ", fromInt(row.slope), " cents/step",',
+        '    "\\n    range pos  ", fromInt(row.rangePos), "% of [lo,hi]",',
+        '    "\\n    momentum   ", fromInt(row.momentum), " cents",',
+        '    "\\n    score      ", fromInt(row.score), "  (threshold ", fromInt(threshold), ")",',
+        '    "\\n    decision   ", row.decision, "  =>  ", explainDecision(row.score, threshold, row.decision),',
+        '    "\\n    saved      signals#", savedId,',
+        '    "\\n    alert      ", alertStatus',
+        '  ])',
+        '',
+        'persistSignal : Json -> String',
+        'persistSignal row = dbInsert("signals", row)',
+        '',
+        'isActionable : Json -> Bool',
+        'isActionable row =',
+        '  if row.decision == "BUY" then True',
+        '  else if row.decision == "SELL" then True',
+        '  else False',
+        '',
+        'tickOneAsset : String -> String -> String',
+        'tickOneAsset acc sym =',
+        '  let trimmed = trim(sym) in',
+        '  if strLength(trimmed) == 0 then acc',
+        '  else',
+        '    let prevCsv = histCsvOrEmpty(trimmed) in',
+        '    let px = fetchPriceCents(trimmed) in',
+        '    let csv = appendHistCsv(prevCsv, px) in',
+        '    let _save = saveHistCsv(trimmed, csv) in',
+        '    let window = lastN(20, parseCsvInts(csv)) in',
+        '    let threshold = __INPUT_signalThreshold__ in',
+        '    let bias = __INPUT_positionBias__ in',
+        '    let bot = __INPUT_telegramBotToken__ in',
+        '    let chat = __INPUT_telegramChatId__ in',
+        '    let row = decisionForAsset(threshold, bias, trimmed, window) in',
+        '    let savedId = persistSignal(row) in',
+        '    let shouldNotify = isActionable(row) in',
+        '    let alertText = joinStr([trimmed, " ", row.decision, " @ $", centsToUsd(px)]) in',
+        '    let alertStatus =',
+        '      if shouldNotify then strConcat("sent -> ", notifyTelegram(bot, chat, alertText))',
+        '      else "skipped (HOLD, not actionable)" in',
+        '    let detail = assetDetail(row, threshold, savedId, alertStatus) in',
+        '    if strLength(acc) == 0 then detail else strConcat(acc, strConcat("\\n\\n", detail))',
         '',
         'main : String',
         'main =',
-        '  let tickId = dbInsert("ticks", livePrice) in',
-        '  let signal = signalFor(livePrice, movingAverage) in',
-        '  strConcat("tick=", strConcat(tickId, strConcat(" priceCents=", strConcat(fromInt(livePrice), strConcat(" maCents=", strConcat(fromInt(movingAverage), strConcat(" signal=", signal)))))))'
+        '  let assets = split(__INPUT_assetsCsv__, ",") in',
+        '  let body = foldl(tickOneAsset, "", assets) in',
+        '  if strLength(body) == 0 then "No assets to evaluate."',
+        '  else strConcat("=== Verdict tick: statistical multi-asset decisions ===\\n\\n", body)',
       ].join('\n'),
       language: 'verdict',
       theme: 'verdict-dark',
@@ -725,7 +1077,6 @@ class VerdictEditorElement extends HTMLElement {
     } finally {
       this.endBusy();
     }
-    this.addInputField('signalBias', '0');
     this.refreshInputsPreview();
     this.refreshDbQueryOutput();
     this.setActiveMainTab(this.isDebugView() ? 'debug' : 'editor');
@@ -811,7 +1162,7 @@ class VerdictEditorElement extends HTMLElement {
     if (!vlib) return;
     let diagnostics: VerdictDiagnostic[];
     try {
-      diagnostics = vlib.diagnosticsJS(this.materializeLiveCode(model.getValue(), this.latestPriceCents, this.latestMovingAverageCents));
+      diagnostics = vlib.diagnosticsJS(this.materializeInputs(model.getValue()));
     } catch {
       // A compiler crash shouldn't wipe the editor; just skip this pass.
       return;
@@ -862,7 +1213,7 @@ class VerdictEditorElement extends HTMLElement {
     if (!vlib) return;
     let results: VerdictBindingResult[];
     try {
-      results = vlib.evalBindingsJS(this.materializeLiveCode(model.getValue(), this.latestPriceCents, this.latestMovingAverageCents));
+      results = vlib.evalBindingsJS(this.materializeInputs(model.getValue()));
     } catch {
       this.resultDecorations.clear();
       return;
@@ -904,25 +1255,29 @@ class VerdictEditorElement extends HTMLElement {
 
   run() {
     if (!this.editor) return;
-    this.beginBusy('Compiling and running...');
-    const code = this.materializeLiveCode(this.editor.getValue(), this.latestPriceCents, this.latestMovingAverageCents);
-    this.renderOutput('Compiling', 'info');
-    
-    // Make sure the squiggles reflect exactly what we're about to compile,
-    // then let the live-diagnostics markers be the source of truth for errors.
+    void this.executeProgram(false);
+  }
+
+  private async executeProgram(persistState: boolean) {
+    if (!this.editor) return;
+    this.beginBusy(persistState ? 'Running strategy...' : 'Compiling and running...');
+    const code = this.materializeInputs(this.editor.getValue());
+    if (!persistState) {
+      this.renderOutput('Compiling', 'info');
+    }
     this.runDiagnostics();
 
     if (!vlib) {
       this.renderOutput('Still loading the compiler… try again in a moment.', 'error');
+      this.endBusy();
       return;
     }
     if (!finvmLib) {
       this.renderOutput('Still loading FinVM… try again in a moment.', 'error');
+      this.endBusy();
       return;
     }
     try {
-      // Compile for the bytecode panel (this is the FinVM target the program
-      // lowers to)...
       const compilation = vlib.compileJS(code);
       if (!compilation.ok) {
         this.bytecodeEditor?.setValue('');
@@ -930,7 +1285,9 @@ class VerdictEditorElement extends HTMLElement {
         if (this.vmStatePanel) {
           this.vmStatePanel.innerHTML = '<div class="text-slate-600 italic">Compilation failed, VM state unavailable.</div>';
         }
-        this.renderDebugVisualizations();
+        if (this.vmDbPanel) {
+          this.vmDbPanel.innerHTML = '<div class="text-slate-600 italic">Compilation failed, VM DB unavailable.</div>';
+        }
         this.renderOutput(`Compilation Error: ${compilation.error}`, 'error');
         return;
       }
@@ -940,10 +1297,10 @@ class VerdictEditorElement extends HTMLElement {
       } catch {
         this.latestCompiledProgram = null;
       }
-      this.renderDebugVisualizations();
-      const vmOut = this.runFinvmProgram(compilation.output, true);
+      const vmOut = await this.runFinvmProgram(compilation.output, persistState);
       if (vmOut.ok) {
-        this.renderOutput(vmOut.resultText, 'ok');
+        const prefix = this.liveRunning ? `Live Tick #${this.liveTickCount}\n` : '';
+        this.renderOutput(`${prefix}${vmOut.resultText}`, 'ok');
       } else {
         this.renderOutput(`Runtime Error: ${vmOut.error}`, 'error');
       }
@@ -988,7 +1345,158 @@ class VerdictEditorElement extends HTMLElement {
     if (!this.vmStatePanel) return;
     this.vmStatePanel.innerHTML = `<pre class="whitespace-pre-wrap break-words text-slate-300">${renderJsonForPanel(snapshot)}</pre>`;
     this.latestVmSnapshot = snapshot;
-    this.renderDebugVisualizations();
+    // DB rows live in finvmState's __finvm.db (host effect storage), not the VM
+    // snapshot, so render the panel from finvmState rather than the raw snapshot.
+    this.renderVmDb(this.finvmState);
+  }
+
+  private renderVmDb(snapshot: unknown) {
+    if (!this.vmDbPanel) return;
+    const tables = extractDbTables(
+      snapshot && typeof snapshot === 'object' ? (snapshot as Record<string, unknown>) : {},
+    );
+    const names = Object.keys(tables);
+    if (names.length === 0) {
+      this.vmDbPanel.innerHTML = '<div class="text-slate-600 italic">No DB tables found in current VM state.</div>';
+      return;
+    }
+    const sections = names
+      .sort((a, b) => (tables[b]?.length ?? 0) - (tables[a]?.length ?? 0))
+      .map((name) => {
+        const rows = tables[name] ?? [];
+        const sample = rows.slice(0, 5).map((r) => ({ id: r.id, value: r.value }));
+        return `
+          <div class="mb-3 rounded border border-slate-800 bg-slate-900/40 p-2">
+            <div class="mb-1 flex items-center justify-between">
+              <span class="text-xs font-semibold text-slate-200">${escapeHtml(name)}</span>
+              <span class="text-[10px] font-mono text-emerald-300">${rows.length} rows</span>
+            </div>
+            <pre class="whitespace-pre-wrap break-words text-[11px] text-slate-400">${renderJsonForPanel(sample)}</pre>
+          </div>
+        `;
+      })
+      .join('');
+    this.vmDbPanel.innerHTML = sections;
+  }
+
+  private renderVmObserver(snapshot: unknown) {
+    if (!this.vmObserverPanel) return;
+    const top = snapshot && typeof snapshot === 'object' ? (snapshot as Record<string, unknown>) : {};
+    const stateRoot = top.state && typeof top.state === 'object' ? (top.state as Record<string, unknown>) : top;
+    const tables = extractDbTables(snapshot);
+    const tableNames = Object.keys(tables);
+    const tableCount = tableNames.length;
+    const rowCount = tableNames.reduce((acc, name) => acc + (tables[name]?.length ?? 0), 0);
+    const threshold = Number(this.signalThresholdInput?.value ?? '0');
+    const memoryBytes = (() => {
+      try {
+        return JSON.stringify(stateRoot).length;
+      } catch {
+        return 0;
+      }
+    })();
+    const registerCount = (() => {
+      const regLikeKeys = Object.keys(stateRoot).filter((k) => /reg|registry|register/i.test(k));
+      if (regLikeKeys.length > 0) {
+        return regLikeKeys.reduce((acc, k) => {
+          const v = stateRoot[k];
+          if (v && typeof v === 'object') return acc + Object.keys(v as Record<string, unknown>).length;
+          return acc + 1;
+        }, 0);
+      }
+      return Object.keys(stateRoot).length;
+    })();
+    const load = this.lastVmSteps;
+    const point = {
+      memoryBytes,
+      load,
+      tables: tableCount,
+      rows: rowCount,
+      regs: registerCount,
+      threshold: Number.isFinite(threshold) ? threshold : 0,
+    };
+    this.vmMetricsHistory = [...this.vmMetricsHistory, point].slice(-120);
+
+    const mkSparkline = (points: number[], color: string) => {
+      const w = 250;
+      const h = 56;
+      if (points.length === 0) {
+        return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><rect x="0" y="0" width="${w}" height="${h}" fill="#020617"/></svg>`;
+      }
+      const max = Math.max(1, ...points);
+      const min = Math.min(...points);
+      const span = Math.max(1, max - min);
+      const coords = points
+        .map((v, i) => {
+          const x = (i / Math.max(1, points.length - 1)) * (w - 6) + 3;
+          const y = h - 4 - ((v - min) / span) * (h - 10);
+          return `${x.toFixed(2)},${y.toFixed(2)}`;
+        })
+        .join(' ');
+      return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">
+        <rect x="0" y="0" width="${w}" height="${h}" fill="#020617" rx="6"/>
+        <polyline points="${coords}" fill="none" stroke="${color}" stroke-width="2"/>
+      </svg>`;
+    };
+
+    const memTrend = this.vmMetricsHistory.map((m) => m.memoryBytes);
+    const loadTrend = this.vmMetricsHistory.map((m) => m.load);
+    const regsTrend = this.vmMetricsHistory.map((m) => m.regs);
+    const rowsTrend = this.vmMetricsHistory.map((m) => m.rows);
+    const leakWindow = memTrend.slice(-20);
+    const leakDelta = leakWindow.length >= 2 ? leakWindow[leakWindow.length - 1] - leakWindow[0] : 0;
+    const leakRisk = leakDelta > 0 ? Math.round((leakDelta / Math.max(1, leakWindow[0])) * 100) : 0;
+    const leakLabel = leakRisk > 15 ? 'high' : leakRisk > 5 ? 'medium' : 'low';
+    const loadPct = Math.min(100, Math.round((load / 1200) * 100));
+
+    this.vmObserverPanel.innerHTML = `
+      <div class="grid grid-cols-1 gap-2 xl:grid-cols-4">
+        <div class="rounded border border-slate-800 bg-slate-900/60 p-2">
+          <div class="text-[10px] uppercase tracking-[0.14em] text-slate-500">Memory</div>
+          <div class="mt-1 text-lg font-bold text-indigo-200">${Math.round(memoryBytes / 1024)} KB</div>
+          <div class="text-[10px] text-slate-500">VM state serialized size</div>
+        </div>
+        <div class="rounded border border-slate-800 bg-slate-900/60 p-2">
+          <div class="text-[10px] uppercase tracking-[0.14em] text-slate-500">Load</div>
+          <div class="mt-1 text-lg font-bold text-sky-200">${load}</div>
+          <div class="mt-2 h-1.5 rounded bg-slate-800"><div class="h-full rounded bg-sky-400" style="width:${loadPct}%"></div></div>
+        </div>
+        <div class="rounded border border-slate-800 bg-slate-900/60 p-2">
+          <div class="text-[10px] uppercase tracking-[0.14em] text-slate-500">Threshold</div>
+          <div class="mt-1 text-lg font-bold text-amber-200">${point.threshold}</div>
+          <div class="text-[10px] text-slate-500">from Inputs.signalThreshold</div>
+        </div>
+        <div class="rounded border border-slate-800 bg-slate-900/60 p-2">
+          <div class="text-[10px] uppercase tracking-[0.14em] text-slate-500">Registries</div>
+          <div class="mt-1 text-lg font-bold text-emerald-200">${registerCount}</div>
+          <div class="text-[10px] text-slate-500">state keys / register-like buckets</div>
+        </div>
+      </div>
+      <div class="mt-3 grid grid-cols-1 gap-2 xl:grid-cols-2">
+        <div class="rounded border border-slate-800 bg-slate-900/60 p-2">
+          <div class="mb-1 flex items-center justify-between text-[10px] uppercase tracking-[0.14em] text-slate-500">
+            <span>Memory Trend</span><span class="text-[10px] normal-case text-rose-300">leak risk: ${leakLabel} (${leakRisk}%)</span>
+          </div>
+          ${mkSparkline(memTrend, '#f472b6')}
+        </div>
+        <div class="rounded border border-slate-800 bg-slate-900/60 p-2">
+          <div class="mb-1 text-[10px] uppercase tracking-[0.14em] text-slate-500">Load Trend (VM steps)</div>
+          ${mkSparkline(loadTrend, '#38bdf8')}
+        </div>
+        <div class="rounded border border-slate-800 bg-slate-900/60 p-2">
+          <div class="mb-1 text-[10px] uppercase tracking-[0.14em] text-slate-500">Registers Trend</div>
+          ${mkSparkline(regsTrend, '#34d399')}
+        </div>
+        <div class="rounded border border-slate-800 bg-slate-900/60 p-2">
+          <div class="mb-1 text-[10px] uppercase tracking-[0.14em] text-slate-500">DB Rows Trend</div>
+          ${mkSparkline(rowsTrend, '#f59e0b')}
+        </div>
+      </div>
+      <div class="mt-2 rounded border border-slate-800 bg-slate-900/60 p-2 text-[11px] text-slate-300">
+        <div class="flex items-center justify-between"><span>DB tables</span><span class="font-mono text-emerald-300">${tableCount}</span></div>
+        <div class="flex items-center justify-between"><span>DB rows</span><span class="font-mono text-emerald-300">${rowCount}</span></div>
+      </div>
+    `;
   }
 
   private renderDebugVisualizations() {
@@ -1085,43 +1593,408 @@ class VerdictEditorElement extends HTMLElement {
     `;
   }
 
-  private runFinvmProgram(programJson: string, persistState: boolean): { ok: true; resultText: string; steps: number } | { ok: false; error: string } {
+  private renderCodeVis() {
+    if (!this.codeVisPanel || !this.editor) return;
+    const source = this.editor.getValue();
+    const lines = source.split('\n');
+    const signatures = new Map<string, string>();
+    const definitions: Array<{ name: string; line: number; body: string }> = [];
+
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i];
+      const sig = line.match(/^([a-z][A-Za-z0-9_]*)\s*:\s*(.+)$/);
+      if (sig) {
+        signatures.set(sig[1], sig[2].trim());
+        continue;
+      }
+      const def = line.match(/^([a-z][A-Za-z0-9_]*)(?:\s+[A-Za-z0-9_]+)*\s*=\s*(.*)$/);
+      if (def) {
+        const name = def[1];
+        let j = i + 1;
+        const bodyLines: string[] = [def[2] ?? ''];
+        while (j < lines.length) {
+          const n = lines[j];
+          if (/^[a-z][A-Za-z0-9_]*(?:\s+[A-Za-z0-9_]+)*\s*=/.test(n) || /^[a-z][A-Za-z0-9_]*\s*:/.test(n)) break;
+          bodyLines.push(n);
+          j += 1;
+        }
+        definitions.push({ name, line: i + 1, body: bodyLines.join('\n') });
+      }
+    }
+
+    const names = new Set(definitions.map((d) => d.name));
+    const edges: Array<{ from: string; to: string }> = [];
+    for (const def of definitions) {
+      for (const name of names) {
+        if (name === def.name) continue;
+        if (new RegExp(`\\b${name}\\s*\\(`).test(def.body) || new RegExp(`\\b${name}\\b`).test(def.body)) {
+          edges.push({ from: def.name, to: name });
+        }
+      }
+    }
+
+    const runtimeFns = ['dbInsert', 'dbGet', 'dbQuery', 'httpGet', 'httpPost', 'sysLog', 'cacheSet', 'cacheGet'];
+    const runtimeHits = runtimeFns.filter((fn) => source.includes(fn));
+
+    this.codeVisPanel.innerHTML = `
+      <div class="mt-3 rounded border border-slate-800 bg-slate-950 p-2">
+        <div class="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500">Function Interaction Maps</div>
+        <div data-minard-signatures class="grid grid-cols-1 gap-2"></div>
+      </div>
+    `;
+
+    void this.renderMinardSignatures(definitions, signatures, edges, runtimeHits);
+  }
+
+  private async ensureMinardRenderer(): Promise<boolean> {
+    if (this.minardLoaded && window.TypeSigRenderer) return true;
+    if (this.minardLoading) return this.minardLoading;
+    this.minardLoading = (async () => {
+      try {
+        const url = 'https://cdn.jsdelivr.net/gh/afcondon/minard@main/type-sig-viz/public/renderer.js';
+        const src = await fetch(url).then((r) => (r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}`))));
+        // Renderer defines `TypeSigRenderer` in global scope.
+        // eslint-disable-next-line no-new-func
+        new Function(`${src}\n;window.TypeSigRenderer = typeof TypeSigRenderer !== 'undefined' ? TypeSigRenderer : window.TypeSigRenderer;`)();
+        this.minardLoaded = !!window.TypeSigRenderer;
+      } catch {
+        this.minardLoaded = false;
+      } finally {
+        this.minardLoading = null;
+      }
+      return this.minardLoaded;
+    })();
+    return this.minardLoading;
+  }
+
+  private parseSignatureAst(sig: string): unknown {
+    // Minimal parser for Minard renderer input shape.
+    let s = sig.trim();
+    const forallMatch = s.match(/^forall\s+([a-zA-Z0-9_\s]+)\.\s*(.+)$/);
+    if (forallMatch) {
+      const vars = forallMatch[1].trim().split(/\s+/).filter(Boolean);
+      return { tag: 'forall', vars, body: this.parseSignatureAst(forallMatch[2]) };
+    }
+    if (s.includes('=>')) {
+      const parts = s.split('=>').map((x) => x.trim()).filter(Boolean);
+      const body = parts.pop() ?? 'Unit';
+      const constraints = parts.map((c) => {
+        const cParts = c.split(/\s+/).filter(Boolean);
+        return {
+          tag: 'constraint',
+          name: cParts[0] ?? 'Constraint',
+          args: cParts.slice(1).map((a) => this.parseSignatureAst(a)),
+        };
+      });
+      return { tag: 'constrained', constraints, body: this.parseSignatureAst(body) };
+    }
+    const arrows = s.split(/\s*->\s*/).map((x) => x.trim()).filter(Boolean);
+    if (arrows.length > 1) {
+      return {
+        tag: 'function',
+        params: arrows.slice(0, -1).map((p) => this.parseSignatureAst(p)),
+        returnType: this.parseSignatureAst(arrows[arrows.length - 1]),
+      };
+    }
+    if (s.startsWith('(') && s.endsWith(')')) {
+      return { tag: 'parens', inner: this.parseSignatureAst(s.slice(1, -1)) };
+    }
+    const tokens = s.split(/\s+/).filter(Boolean);
+    if (tokens.length <= 1) {
+      const t = tokens[0] ?? 'Unit';
+      return /^[a-z]/.test(t) ? { tag: 'typevar', name: t } : { tag: 'constructor', name: t };
+    }
+    const head = tokens[0];
+    return {
+      tag: 'applied',
+      constructor: /^[a-z]/.test(head) ? { tag: 'typevar', name: head } : { tag: 'constructor', name: head },
+      args: tokens.slice(1).map((t) => (/^[a-z]/.test(t) ? { tag: 'typevar', name: t } : { tag: 'constructor', name: t })),
+    };
+  }
+
+  private async renderMinardSignatures(
+    definitions: Array<{ name: string; line: number; body: string }>,
+    signatures: Map<string, string>,
+    edges: Array<{ from: string; to: string }>,
+    runtimeHits: string[],
+  ) {
+    if (!this.codeVisPanel) return;
+    const host = this.codeVisPanel.querySelector<HTMLElement>('[data-minard-signatures]');
+    if (!host) return;
+    host.innerHTML = '<div class="text-xs text-slate-500">Loading Minard renderer…</div>';
+    const ok = await this.ensureMinardRenderer();
+    if (!ok || !window.TypeSigRenderer) {
+      host.innerHTML = '<div class="text-xs text-amber-300">Minard renderer unavailable. Check network access.</div>';
+      return;
+    }
+    host.innerHTML = '';
+
+    const umlWrap = document.createElement('div');
+    umlWrap.className = 'mb-2 rounded border border-slate-800 bg-slate-900/40 p-2 overflow-auto';
+    umlWrap.appendChild(this.renderUmlDiagram(definitions, signatures, edges, runtimeHits));
+    host.appendChild(umlWrap);
+
+    for (const def of definitions.slice(0, 8)) {
+      const sig = signatures.get(def.name);
+      if (!sig) continue;
+      const card = document.createElement('div');
+      card.className = 'rounded border border-slate-800 bg-slate-900/40 p-2 overflow-auto';
+      try {
+        const ast = this.parseSignatureAst(sig);
+        const svg = window.TypeSigRenderer.renderSignature(def.name, sig, ast, {});
+        if (svg) {
+          svg.setAttribute('width', '100%');
+          card.appendChild(svg);
+        }
+      } catch {
+        const fallback = document.createElement('div');
+        fallback.className = 'text-xs text-slate-400 font-mono';
+        fallback.textContent = `${def.name} : ${sig}`;
+        card.appendChild(fallback);
+      }
+      host.appendChild(card);
+    }
+    if (!host.hasChildNodes()) {
+      host.innerHTML = '<div class="text-xs text-slate-500">No typed top-level bindings found.</div>';
+    }
+  }
+
+  private renderUmlDiagram(
+    definitions: Array<{ name: string; line: number; body: string }>,
+    signatures: Map<string, string>,
+    edges: Array<{ from: string; to: string }>,
+    runtimeHits: string[],
+  ): HTMLDivElement {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'flex flex-col gap-3';
+
+    let compiledProgram: { functions?: Record<string, { instructions?: unknown[] }> } | null = null;
+    if (this.editor && vlib) {
+      try {
+        const source = this.materializeInputs(this.editor.getValue());
+        const compilation = vlib.compileJS(source);
+        if (compilation?.ok) {
+          compiledProgram = JSON.parse(compilation.output) as { functions?: Record<string, { instructions?: unknown[] }> };
+        }
+      } catch {
+        compiledProgram = null;
+      }
+    }
+
+    const mkPanZoom = (svg: SVGElement) => {
+      const frame = document.createElement('div');
+      frame.className = 'rounded border border-slate-800 bg-slate-900/40 p-2';
+      const controls = document.createElement('div');
+      controls.className = 'mb-2 flex items-center gap-2 text-[10px] text-slate-300';
+      controls.innerHTML = '<button data-reset class="rounded border border-slate-600 px-2 py-0.5 hover:bg-slate-800">Reset View</button>';
+      const viewport = document.createElement('div');
+      viewport.className = 'overflow-auto rounded border border-slate-800 bg-[#020617]';
+      viewport.style.height = '420px';
+      viewport.style.cursor = 'grab';
+      const inner = document.createElement('div');
+      inner.style.transformOrigin = '0 0';
+      inner.style.willChange = 'transform';
+      inner.appendChild(svg);
+      viewport.appendChild(inner);
+      frame.appendChild(controls);
+      frame.appendChild(viewport);
+
+      let scale = 1.25;
+      let tx = 0;
+      let ty = 0;
+      const apply = () => {
+        inner.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+      };
+      apply();
+      let dragging = false;
+      let sx = 0;
+      let sy = 0;
+      viewport.addEventListener('mousedown', (e) => {
+        dragging = true;
+        sx = e.clientX - tx;
+        sy = e.clientY - ty;
+        viewport.style.cursor = 'grabbing';
+      });
+      window.addEventListener('mouseup', () => {
+        dragging = false;
+        viewport.style.cursor = 'grab';
+      });
+      window.addEventListener('mousemove', (e) => {
+        if (!dragging) return;
+        tx = e.clientX - sx;
+        ty = e.clientY - sy;
+        apply();
+      });
+      viewport.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const next = Math.max(0.55, Math.min(2.6, scale * (e.deltaY > 0 ? 0.92 : 1.08)));
+        scale = next;
+        apply();
+      }, { passive: false });
+      const reset = controls.querySelector<HTMLButtonElement>('[data-reset]');
+      reset?.addEventListener('click', () => {
+        scale = 1.25;
+        tx = 0;
+        ty = 0;
+        apply();
+      });
+
+      return frame;
+    };
+
+    const fnEntries = Object.entries(compiledProgram?.functions ?? {}).map(([name, fn]) => {
+      const ins = Array.isArray(fn.instructions) ? fn.instructions : [];
+      let jumps = 0;
+      let builtins = 0;
+      const callees: string[] = [];
+      for (const row of ins) {
+        if (!Array.isArray(row) || row.length === 0) continue;
+        const op = String(row[0]);
+        if (op === 'JUMP' || op === 'JUMP_IF_FALSE' || op === 'JUMP_IF_TRUE') jumps += 1;
+        if (op === 'CALL_BUILTIN') builtins += 1;
+        if (op === 'CALL' && typeof row[2] === 'string') callees.push(String(row[2]));
+      }
+      return { name, insCount: ins.length, jumps, builtins, callees };
+    });
+    const topFns = [...fnEntries].sort((a, b) => b.insCount - a.insCount).slice(0, 12);
+    const maxIns = Math.max(1, ...topFns.map((f) => f.insCount));
+
+    const mkGraph = (w: number, h: number, title: string) => {
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+      svg.setAttribute('width', String(w));
+      svg.setAttribute('height', String(h));
+      svg.setAttribute('style', 'background:#071026;border-radius:8px;');
+      const mk = (tag: string, attrs: Record<string, string>) => {
+        const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+        for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+        return el;
+      };
+      const txt = (x: number, y: number, t: string, fill: string, size = 11, weight = '500') => {
+        const el = mk('text', { x: String(x), y: String(y), fill, 'font-size': String(size), 'font-family': 'ui-monospace, SFMono-Regular, Menlo, monospace', 'font-weight': weight });
+        el.textContent = t;
+        return el;
+      };
+      svg.appendChild(txt(16, 22, title, '#cbd5e1', 14, '700'));
+      return { svg, mk, txt };
+    };
+
+    // 1) Performance heaviness graph
+    const perf = mkGraph(1250, Math.max(280, 72 + topFns.length * 34), 'Compiled Function Heaviness');
+    topFns.forEach((f, i) => {
+      const y = 56 + i * 34;
+      const barW = Math.max(20, Math.floor((f.insCount / maxIns) * 620));
+      const c = f.jumps > 0 ? '#f59e0b' : '#60a5fa';
+      perf.svg.appendChild(perf.mk('rect', { x: '255', y: String(y - 16), width: String(barW), height: '20', rx: '6', fill: c, opacity: '0.9' }));
+      perf.svg.appendChild(perf.txt(18, y - 2, f.name, '#e2e8f0', 11, '700'));
+      perf.svg.appendChild(perf.txt(264 + barW, y - 2, `ins:${f.insCount}  branches:${f.jumps}  builtins:${f.builtins}`, '#cbd5e1', 10, '600'));
+    });
+    wrapper.appendChild(mkPanZoom(perf.svg));
+
+    // 2) Decision graph
+    const decisionFns = topFns.filter((f) => f.jumps > 0).slice(0, 4);
+    decisionFns.forEach((f) => {
+      const d = mkGraph(1200, Math.max(320, 170 + f.jumps * 120), `Decision Graph: ${f.name}`);
+      const cx = 600;
+      let y = 74;
+      d.svg.appendChild(d.mk('circle', { cx: String(cx), cy: String(y), r: '10', fill: '#22c55e' }));
+      for (let i = 0; i < f.jumps; i += 1) {
+        const ny = y + 104;
+        const pts = `${cx},${ny - 30} ${cx + 120},${ny} ${cx},${ny + 30} ${cx - 120},${ny}`;
+        d.svg.appendChild(d.mk('line', { x1: String(cx), y1: String(y + 10), x2: String(cx), y2: String(ny - 30), stroke: '#94a3b8', 'stroke-width': '2' }));
+        d.svg.appendChild(d.mk('polygon', { points: pts, fill: '#1f2937', stroke: '#f59e0b', 'stroke-width': '2' }));
+        d.svg.appendChild(d.txt(cx - 76, ny + 4, `branch ${i + 1}`, '#fde68a', 11, '700'));
+        d.svg.appendChild(d.mk('line', { x1: String(cx - 120), y1: String(ny), x2: String(cx - 240), y2: String(ny + 48), stroke: '#60a5fa', 'stroke-width': '2' }));
+        d.svg.appendChild(d.mk('line', { x1: String(cx + 120), y1: String(ny), x2: String(cx + 240), y2: String(ny + 48), stroke: '#34d399', 'stroke-width': '2' }));
+        y = ny;
+      }
+      const ey = y + 92;
+      d.svg.appendChild(d.mk('line', { x1: String(cx), y1: String(y + 10), x2: String(cx), y2: String(ey - 16), stroke: '#94a3b8', 'stroke-width': '2' }));
+      d.svg.appendChild(d.mk('circle', { cx: String(cx), cy: String(ey), r: '12', fill: '#0f172a', stroke: '#22c55e', 'stroke-width': '3' }));
+      d.svg.appendChild(d.mk('circle', { cx: String(cx), cy: String(ey), r: '5', fill: '#22c55e' }));
+      wrapper.appendChild(mkPanZoom(d.svg));
+    });
+
+    // 3) Call graph
+    const cg = mkGraph(1250, 720, 'Compiled Call Graph');
+    const nodes = topFns.map((f, idx) => {
+      const a = (Math.PI * 2 * idx) / Math.max(1, topFns.length);
+      const x = 625 + Math.cos(a) * 260;
+      const y = 360 + Math.sin(a) * 220;
+      const r = 22 + Math.round((f.insCount / maxIns) * 18);
+      return { name: f.name, x, y, r };
+    });
+    const nodeMap = new Map(nodes.map((n) => [n.name, n]));
+    topFns.forEach((f) => {
+      for (const c of f.callees) {
+        const a = nodeMap.get(f.name);
+        const b = nodeMap.get(c);
+        if (!a || !b) continue;
+        cg.svg.appendChild(cg.mk('line', { x1: String(a.x), y1: String(a.y), x2: String(b.x), y2: String(b.y), stroke: '#60a5fa', 'stroke-width': '1.8', opacity: '0.85' }));
+      }
+    });
+    nodes.forEach((n) => {
+      cg.svg.appendChild(cg.mk('circle', { cx: String(n.x), cy: String(n.y), r: String(n.r), fill: '#1e293b', stroke: '#818cf8', 'stroke-width': '2' }));
+      cg.svg.appendChild(cg.txt(n.x - n.r + 6, n.y + 4, n.name, '#e2e8f0', 10, '700'));
+    });
+    wrapper.appendChild(mkPanZoom(cg.svg));
+
+    const sigNote = document.createElement('div');
+    sigNote.className = 'rounded border border-slate-800 bg-slate-900/40 p-2 text-[11px] text-slate-400';
+    sigNote.innerHTML = topFns
+      .slice(0, 8)
+      .map((f) => `<div><span class="text-slate-200">Function ${escapeHtml(f.name)}</span> : ${escapeHtml(signatures.get(f.name) ?? '(inferred)')}</div>`)
+      .join('');
+    wrapper.appendChild(sigNote);
+
+    return wrapper;
+  }
+
+  private async runFinvmProgram(programJson: string, persistState: boolean): Promise<{ ok: true; resultText: string; steps: number } | { ok: false; error: string }> {
     const finvm = finvmLib as FinVmModule;
     try {
       const program = JSON.parse(programJson);
-      if (persistState) {
-        program.state = this.finvmState;
+      const state = persistState ? this.finvmState : {};
+      const storage = this.effectStorage ?? createEffectStorage();
+      this.effectStorage = storage;
+      const vmOut = await runProgramWithEffects(finvm, JSON.stringify(program), {
+        state,
+        handlers: createFinvmHandlers(storage),
+      });
+      if (!vmOut.ok) {
+        return { ok: false, error: vmOut.error };
       }
-      const raw = finvm.runJsonProgram(JSON.stringify(program));
-      const parsed = parseRunJsonProgram(raw);
-      if (!parsed) {
-        return { ok: false, error: raw };
-      }
+      this.lastVmSteps = vmOut.steps;
+      // db.* effects are fulfilled host-side in the effect storage, so DB rows
+      // never appear in the VM's returned state. Surface the host db snapshot
+      // under __finvm.db so the Debug "VM DB" panel and the DB tab can read it.
+      const dbState = effectDbTablesToFinvmState(storage.listDbTables());
+      this.finvmState = {
+        ...(persistState ? vmOut.state : this.finvmState),
+        '__finvm.db': dbState,
+      };
       if (this.vmStatePanel) {
-        this.renderVmState(parsed);
+        this.renderVmState({
+          status: 'completed',
+          steps: vmOut.steps,
+          result: vmOut.result,
+          state: vmOut.state,
+        });
       }
-      if (parsed.status !== 'completed') {
-        return { ok: false, error: String(parsed.error ?? 'execution failed') };
-      }
-      if (persistState && parsed.state && typeof parsed.state === 'object') {
-        this.finvmState = parsed.state as Record<string, unknown>;
-        this.refreshDbQueryOutput();
-      }
+      this.refreshDbQueryOutput();
       return {
         ok: true,
-        resultText: formatVmValue(parsed.result),
-        steps: typeof parsed.steps === 'number' ? parsed.steps : 0,
+        resultText: formatVmValue(vmOut.result),
+        steps: vmOut.steps,
       };
     } catch (e) {
       return { ok: false, error: String(e) };
     }
   }
 
-  private materializeLiveCode(code: string, latestPriceCents: number, movingAverageCents: number): string {
-    let materialized = code
-      .replaceAll('__LIVE_PRICE__', String(latestPriceCents))
-      .replaceAll('__LIVE_MA__', String(movingAverageCents));
+  private materializeInputs(code: string): string {
     const runtimeInputs = this.readRuntimeInputs();
+    let materialized = code;
     for (const [key, value] of Object.entries(runtimeInputs)) {
       materialized = materialized.replaceAll(`__INPUT_${key}__`, toVerdictLiteral(value));
     }
@@ -1134,6 +2007,11 @@ class VerdictEditorElement extends HTMLElement {
     const out: Record<string, unknown> = {
       symbol: this.currentSymbol(),
       intervalSec: Math.floor(this.currentIntervalMs() / 1000),
+      assetsCsv: this.assetsCsvInput?.value ?? 'BTCUSD,ETHUSD,ADAUSD',
+      signalThreshold: Number(this.signalThresholdInput?.value ?? '2'),
+      positionBias: Number(this.positionBiasInput?.value ?? '0'),
+      telegramBotToken: this.telegramBotTokenInput?.value ?? '',
+      telegramChatId: this.telegramChatIdInput?.value ?? '',
     };
     if (this.inputsList) {
       const rows = this.inputsList.querySelectorAll<HTMLDivElement>('[data-input-row]');
@@ -1152,6 +2030,7 @@ class VerdictEditorElement extends HTMLElement {
     }
     return out;
   }
+
 
   private addInputField(key: string, value: string) {
     if (!this.inputsList) return;
@@ -1195,19 +2074,11 @@ class VerdictEditorElement extends HTMLElement {
     const intervalSec = Math.floor(this.currentIntervalMs() / 1000);
     const preview = {
       running: this.liveRunning,
-      symbol: this.currentSymbol(),
-      binanceSymbol: this.symbolForBinance(this.currentSymbol()),
       intervalSec,
-      latestPriceCents: this.latestPriceCents,
-      latestMovingAverageCents: this.latestMovingAverageCents,
-      sampleCount: this.marketHistoryCents.length,
       tickCount: this.liveTickCount,
       userInputs,
-      placeholders: [
-        '__LIVE_PRICE__',
-        '__LIVE_MA__',
-        ...Object.keys(userInputs).map((k) => `__INPUT_${k}__`),
-      ],
+      placeholders: Object.keys(userInputs).map((k) => `__INPUT_${k}__`),
+      note: 'Market data is fetched inside your Verdict code (httpGet). The editor only substitutes __INPUT_* values and runs the VM.',
     };
     const json = JSON.stringify(preview, null, 2);
     this.inputsPreview.innerHTML = `<pre class="whitespace-pre-wrap break-words">${escapeHtml(json)}</pre>`;
@@ -1232,23 +2103,6 @@ class VerdictEditorElement extends HTMLElement {
     return raw === '' ? 'BTCUSD' : raw;
   }
 
-  private symbolForBinance(rawSymbol: string): string {
-    // UX-friendly alias: users often type BTCUSD, Binance spot uses BTCUSDT.
-    if (rawSymbol === 'BTCUSD') return 'BTCUSDT';
-    return rawSymbol;
-  }
-
-  private async fetchBinancePriceCents(symbol: string): Promise<number> {
-    const resolved = this.symbolForBinance(symbol);
-    const url = `https://api.binance.com/api/v3/ticker/price?symbol=${encodeURIComponent(resolved)}`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Binance HTTP ${res.status}`);
-    const body = await res.json() as { price?: string };
-    const price = Number(body.price);
-    if (!Number.isFinite(price)) throw new Error('Binance payload missing numeric price');
-    return Math.round(price * 100);
-  }
-
   private updateLiveButtonState() {
     if (this.runToggleBtn) {
       if (this.liveRunning) {
@@ -1267,49 +2121,11 @@ class VerdictEditorElement extends HTMLElement {
   private async runLiveTick() {
     if (this.tickInFlight || !this.editor) return;
     this.tickInFlight = true;
-    this.beginBusy('Fetching market data...');
+    this.liveTickCount += 1;
     try {
-      const symbol = this.currentSymbol();
-      const priceCents = await this.fetchBinancePriceCents(symbol);
-      this.liveTickCount += 1;
-      this.latestPriceCents = priceCents;
-      this.marketHistoryCents.push(priceCents);
-      const sum = this.marketHistoryCents.reduce((a, b) => a + b, 0);
-      this.latestMovingAverageCents = this.marketHistoryCents.length === 0 ? 0 : Math.floor(sum / this.marketHistoryCents.length);
-      this.refreshInputsPreview();
-
-      const source = this.materializeLiveCode(this.editor.getValue(), this.latestPriceCents, this.latestMovingAverageCents);
-      const compilation = vlib.compileJS(source);
-      if (!compilation.ok) {
-        this.latestCompiledProgram = null;
-        this.renderDebugVisualizations();
-        this.renderOutput(`Compilation Error: ${compilation.error}`, 'error');
-        return;
-      }
-      this.bytecodeEditor?.setValue(compilation.output);
-      try {
-        this.latestCompiledProgram = JSON.parse(compilation.output);
-      } catch {
-        this.latestCompiledProgram = null;
-      }
-      this.renderDebugVisualizations();
-      const vmOut = this.runFinvmProgram(compilation.output, true);
-      if (!vmOut.ok) {
-        this.renderOutput(`Runtime Error: ${vmOut.error}`, 'error');
-        return;
-      }
-
-      const priceText = (this.latestPriceCents / 100).toFixed(2);
-      const maText = (this.latestMovingAverageCents / 100).toFixed(2);
-      this.renderOutput(
-        `Live Tick #${this.liveTickCount} (${symbol})\nprice=${priceText} ma=${maText} samples=${this.marketHistoryCents.length}\nresult=${vmOut.resultText}\nsteps=${vmOut.steps}`,
-        'ok',
-      );
-    } catch (e) {
-      this.renderOutput(`Live Tick Error: ${String(e)}`, 'error');
+      await this.executeProgram(true);
     } finally {
       this.tickInFlight = false;
-      this.endBusy();
     }
   }
 
@@ -1322,12 +2138,12 @@ class VerdictEditorElement extends HTMLElement {
     this.liveRunning = true;
     this.liveTickCount = 0;
     this.finvmState = {};
-    this.marketHistoryCents = [];
-    this.latestPriceCents = 0;
-    this.latestMovingAverageCents = 0;
+    this.effectStorage = createEffectStorage();
+    this.lastVmSteps = 0;
+    this.vmMetricsHistory = [];
     this.updateLiveButtonState();
     this.refreshDbQueryOutput();
-    this.renderOutput('Live loop started… waiting for first tick.', 'info');
+    this.renderOutput('Live loop started… running your Verdict strategy on each tick.', 'info');
     await this.runLiveTick();
     const intervalMs = this.currentIntervalMs();
     this.pollTimer = window.setInterval(() => {
@@ -1358,6 +2174,8 @@ class VerdictEditorElement extends HTMLElement {
     this.editor = null;
     this.bytecodeEditor = null;
     this.vmStatePanel = null;
+    this.vmObserverPanel = null;
+    this.vmDbPanel = null;
     this.resultDecorations = null;
     // Reset so a reconnect (e.g. SPA route re-entry) rebuilds from scratch
     // rather than leaving disposed editors behind.
@@ -1373,7 +2191,8 @@ class VerdictEditorDebugElement extends VerdictEditorElement {
 }
 
 interface FinVmModule {
-  runJsonProgram: (programJson: string) => string;
+  runEffectStart: (programJson: string) => (overridesJson: string) => string;
+  runEffectResume: (programJson: string) => (snapshotJson: string) => (deliveriesJson: string) => string;
 }
 
 customElements.define('verdict-editor', VerdictEditorElement);

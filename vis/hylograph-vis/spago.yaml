@@ -1,0 +1,31 @@
+package:
+  name: hylograph-vis
+  bundle:
+    module: Main
+    outfile: ../../public/lib/hylograph-vis.mjs
+    platform: browser
+  dependencies:
+    - arrays: ">=7.3.0 <8.0.0"
+    - console: ">=6.1.0 <7.0.0"
+    - effect: ">=4.0.0 <5.0.0"
+    - foreign: ">=7.0.0 <8.0.0"
+    - foldable-traversable: ">=6.0.0 <7.0.0"
+    - transformers: ">=6.0.0 <7.0.0"
+    - hylograph-selection: ">=0.5.0 <0.6.0"
+    - maybe: ">=6.0.0 <7.0.0"
+    - prelude: ">=6.0.2 <7.0.0"
+    - strings: ">=6.0.1 <7.0.0"
+
+workspace:
+  packageSet:
+    registry: 55.0.0
+  extraPackages:
+    hylograph-selection:
+      git: https://github.com/afcondon/purescript-hylograph-selection.git
+      ref: main
+    hylograph-graph:
+      git: https://github.com/afcondon/purescript-hylograph-graph.git
+      ref: main
+    hylograph-transitions:
+      git: https://github.com/afcondon/purescript-hylograph-transitions.git
+      ref: main
