@@ -20,6 +20,8 @@ import {
   runDbQuery,
   toVerdictLiteral,
 } from './editor/runtimeUtils';
+import { installArrowOverlay } from './editor/vizArrows';
+import { extractDocs, gasFromBytecode, renderCallGraph, type GasInfo } from './editor/vizGraph';
 
 declare global {
   interface Window {
@@ -162,6 +164,40 @@ function loadVerdictLibs(): Promise<void> {
     });
   }
   return libsPromise;
+}
+
+// The code-block visualizer (hylograph-vis.mjs) exposes `renderCode(selector,
+// ast)` which builds nested HTML blocks from the compiler's `astJS` output.
+// Loaded lazily the first time the Visual tab is opened, same raw-asset path as
+// the compiler/VM blobs above.
+let hyloLib: any = null;
+let hyloPromise: Promise<void> | null = null;
+
+function loadHyloLib(): Promise<void> {
+  if (!hyloPromise) {
+    hyloPromise = importPublicModule('/lib/hylograph-vis.mjs').then((m) => {
+      hyloLib = m;
+    });
+  }
+  return hyloPromise;
+}
+
+// Separate "analysis" compiler bundle for the Visual tab only. It carries the
+// `astJS` export (structure for the block view) and is decoupled from the run
+// bundle (verdict.mjs) on purpose: the run bundle is the effect-based generation
+// that matches finvm.mjs/effectDriver, while this one is rebuilt from current
+// source. astJS only PARSES (no bytecode/IO), so the effect-vs-builtin split is
+// irrelevant to it — keeping run and visualization on their respective bundles.
+let astLib: any = null;
+let astLibPromise: Promise<void> | null = null;
+
+function loadAstLib(): Promise<void> {
+  if (!astLibPromise) {
+    astLibPromise = importPublicModule('/lib/verdict-ast.mjs').then((m) => {
+      astLib = m;
+    });
+  }
+  return astLibPromise;
 }
 
 // A structured diagnostic from the Verdict compiler. Positions are 1-based,
@@ -335,7 +371,7 @@ function defineVerdict() {
 
 class VerdictEditorElement extends HTMLElement {
   private activeSideTab: 'output' | 'inputs' = 'output';
-  private activeMainTab: 'editor' | 'db' | 'debug' = 'editor';
+  private activeMainTab: 'editor' | 'db' | 'debug' | 'visual' = 'editor';
   private editor: monaco.editor.IStandaloneCodeEditor | null = null;
   private bytecodeEditor: monaco.editor.IStandaloneCodeEditor | null = null;
   private container!: HTMLDivElement;
@@ -347,6 +383,13 @@ class VerdictEditorElement extends HTMLElement {
   private vmObserverPanel: HTMLDivElement | null = null;
   private vmDbPanel: HTMLDivElement | null = null;
   private codeVisPanel: HTMLDivElement | null = null;
+  private vizPanel: HTMLDivElement | null = null;
+  private vizRoot: HTMLDivElement | null = null;
+  private vizDirty = true;
+  private vizListenersAttached = false;
+  private vizCleanup: (() => void) | null = null;
+  private collapsedDefs = new Set<string>();
+  private vizMode: 'blocks' | 'map' = 'blocks';
   private inputsPreview: HTMLDivElement | null = null;
   private inputsList: HTMLDivElement | null = null;
   private dbQueryInput: HTMLInputElement | null = null;
@@ -423,7 +466,7 @@ class VerdictEditorElement extends HTMLElement {
     const editorHeader = sectionHeader('Workspace', 'Main.verdict');
     const mainTabBar = document.createElement('div');
     mainTabBar.className = 'flex items-center gap-1 border-b border-slate-800 bg-slate-950 px-2 py-1.5';
-    const mkMainTabBtn = (id: 'editor' | 'db' | 'debug', label: string) => {
+    const mkMainTabBtn = (id: 'editor' | 'db' | 'debug' | 'visual', label: string) => {
       const btn = document.createElement('button');
       btn.dataset.mainTabId = id;
       btn.className = 'rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wider';
@@ -433,6 +476,7 @@ class VerdictEditorElement extends HTMLElement {
     };
     mainTabBar.appendChild(mkMainTabBtn('editor', 'Editor'));
     mainTabBar.appendChild(mkMainTabBtn('db', 'DB'));
+    mainTabBar.appendChild(mkMainTabBtn('visual', 'Visual'));
     mainTabBar.appendChild(mkMainTabBtn('debug', 'Debug'));
 
     this.statusBar = document.createElement('div');
@@ -515,6 +559,39 @@ class VerdictEditorElement extends HTMLElement {
     this.debugPanel.appendChild(debugWrap);
     leftPane.appendChild(this.debugPanel);
     this.codeVisPanel = null;
+
+    // Visual tab: a non-editable view of the user's code. Two modes — "Blocks"
+    // (nested-block sketch, rendered by the PureScript renderer from the AST) and
+    // "Map" (the call graph with per-function gas, host-rendered).
+    this.vizPanel = document.createElement('div');
+    this.vizPanel.className = 'hidden flex-1 min-h-0 flex flex-col bg-[#0b0f1a]';
+
+    const vizHeader = document.createElement('div');
+    vizHeader.className = 'flex items-center gap-1 border-b border-slate-800 bg-slate-950 px-2 py-1.5';
+    const mkVizModeBtn = (mode: 'blocks' | 'map', label: string) => {
+      const btn = document.createElement('button');
+      btn.dataset.vizMode = mode;
+      btn.textContent = label;
+      btn.onclick = () => this.setVizMode(mode);
+      return btn;
+    };
+    vizHeader.appendChild(mkVizModeBtn('blocks', 'Blocks'));
+    vizHeader.appendChild(mkVizModeBtn('map', 'Map'));
+
+    const vizScroll = document.createElement('div');
+    vizScroll.className = 'flex-1 min-h-0 overflow-auto';
+    const vizRoot = document.createElement('div');
+    vizRoot.id = 'verdict-viz-root';
+    vizRoot.className = 'min-h-full';
+    vizRoot.innerHTML = '<div class="p-4 text-slate-500 italic">Open this tab to see your code.</div>';
+    vizScroll.appendChild(vizRoot);
+    this.vizRoot = vizRoot;
+
+    this.vizPanel.appendChild(vizHeader);
+    this.vizPanel.appendChild(vizScroll);
+    leftPane.appendChild(this.vizPanel);
+    this.updateVizModeButtons();
+
     leftPane.appendChild(this.statusBar);
 
     const rightPanel = document.createElement('div');
@@ -1104,7 +1181,7 @@ class VerdictEditorElement extends HTMLElement {
     });
   }
 
-  private setActiveMainTab(tab: 'editor' | 'db' | 'debug') {
+  private setActiveMainTab(tab: 'editor' | 'db' | 'debug' | 'visual') {
     this.activeMainTab = tab;
     this.container.classList.toggle('hidden', tab !== 'editor');
     if (this.dbPanel) {
@@ -1113,6 +1190,12 @@ class VerdictEditorElement extends HTMLElement {
     if (this.debugPanel) {
       this.debugPanel.classList.toggle('hidden', tab !== 'debug');
     }
+    if (this.vizPanel) {
+      this.vizPanel.classList.toggle('hidden', tab !== 'visual');
+    }
+    if (tab === 'visual') {
+      void this.refreshVisualization();
+    }
     const tabButtons = this.mainContainer.querySelectorAll<HTMLButtonElement>('[data-main-tab-id]');
     tabButtons.forEach((btn) => {
       const selected = btn.dataset.mainTabId === tab;
@@ -1120,6 +1203,127 @@ class VerdictEditorElement extends HTMLElement {
         ? 'rounded bg-indigo-600/30 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-indigo-200 ring-1 ring-inset ring-indigo-400/40'
         : 'rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 hover:text-white';
     });
+  }
+
+  // The source changed; the block view is stale. Re-render only if it's the
+  // visible tab (rendering into a hidden panel would waste work each keystroke).
+  private markVizDirty() {
+    this.vizDirty = true;
+    if (this.activeMainTab === 'visual') {
+      void this.refreshVisualization();
+    }
+  }
+
+  // Parse the current source via the compiler's `astJS` and render it as nested
+  // code blocks. Parse-only, so it shows structure even when later compile
+  // stages have errors.
+  private async refreshVisualization() {
+    if (!this.vizRoot || !this.vizDirty) return;
+    try {
+      if (!hyloLib) await loadHyloLib();
+      if (!astLib) await loadAstLib();
+      if (!astLib || !hyloLib || !this.editor) return;
+      if (typeof astLib.astJS !== 'function') {
+        this.vizRoot.innerHTML =
+          '<div class="p-4 text-slate-500 italic">Code view unavailable: <code>/lib/verdict-ast.mjs</code> has no <code>astJS</code> export. See docs/visualization-tab-design.md.</div>';
+        return;
+      }
+      const source = this.materializeInputs(this.editor.getValue());
+      const res = astLib.astJS(source);
+      this.vizCleanup?.();
+      this.vizCleanup = null;
+      if (!res?.ok) {
+        this.vizRoot.innerHTML = `<div class="p-4 text-slate-500 italic">Can't show the code — ${escapeHtml(res?.error ?? 'parse error')}.</div>`;
+        return;
+      }
+      const ast = JSON.parse(res.ast);
+      const docs = extractDocs(source);
+      if (this.vizMode === 'map') {
+        const gas = this.computeGasInfo(source);
+        this.vizCleanup = renderCallGraph(this.vizRoot, ast, gas, docs, (line) => this.jumpToSourceLine(line));
+      } else {
+        hyloLib.renderCode(`#${this.vizRoot.id}`, ast);
+        this.attachVizListeners();
+        // The renderer emits every card open; restore the user's collapsed ones,
+        // and surface each function's doc comment on hover.
+        this.vizRoot.querySelectorAll<HTMLDetailsElement>('details[data-def]').forEach((d) => {
+          if (d.dataset.def && this.collapsedDefs.has(d.dataset.def)) d.removeAttribute('open');
+          const doc = d.dataset.def ? docs.get(d.dataset.def) : undefined;
+          if (doc) d.title = doc;
+        });
+        const content = this.vizRoot.firstElementChild as HTMLElement | null;
+        if (content) this.vizCleanup = installArrowOverlay(content);
+      }
+      this.vizDirty = false;
+    } catch (e) {
+      this.vizRoot.innerHTML = `<div class="p-4 text-rose-400">Visualization error: ${escapeHtml(String(e))}</div>`;
+    }
+  }
+
+  // Per-function gas (static bytecode instruction count) + capabilities, for the
+  // Map view. Needs a successful compile; returns empty if the program only
+  // parses (the map still draws, just without gas numbers).
+  private computeGasInfo(source: string): Map<string, GasInfo> {
+    try {
+      // Use the analysis bundle (matches astJS) for gas counting; it's never run,
+      // only its instruction counts/builtins are read.
+      const c = astLib.compileJS(source);
+      if (!c?.ok) return new Map();
+      return gasFromBytecode(JSON.parse(c.output));
+    } catch {
+      return new Map();
+    }
+  }
+
+  private setVizMode(mode: 'blocks' | 'map') {
+    if (this.vizMode === mode) return;
+    this.vizMode = mode;
+    this.updateVizModeButtons();
+    this.vizDirty = true;
+    void this.refreshVisualization();
+  }
+
+  private updateVizModeButtons() {
+    this.vizPanel?.querySelectorAll<HTMLButtonElement>('[data-viz-mode]').forEach((btn) => {
+      const on = btn.dataset.vizMode === this.vizMode;
+      btn.className = on
+        ? 'rounded bg-indigo-600/30 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-indigo-200 ring-1 ring-inset ring-indigo-400/40'
+        : 'rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 hover:text-white';
+    });
+  }
+
+  // One-time delegated listeners on the viz container: click-a-block→source, and
+  // collapse-state tracking.
+  private attachVizListeners() {
+    if (this.vizListenersAttached || !this.vizRoot) return;
+    this.vizListenersAttached = true;
+    this.vizRoot.addEventListener('click', (e) => {
+      const el = (e.target as HTMLElement).closest<HTMLElement>('[data-src-line]');
+      if (!el) return;
+      const line = Number(el.dataset.srcLine);
+      if (Number.isFinite(line)) this.jumpToSourceLine(line);
+    });
+    // `toggle` doesn't bubble, so capture it on the way down.
+    this.vizRoot.addEventListener(
+      'toggle',
+      (e) => {
+        const d = e.target as HTMLDetailsElement;
+        if (!(d instanceof HTMLDetailsElement) || !d.dataset.def) return;
+        if (d.open) this.collapsedDefs.delete(d.dataset.def);
+        else this.collapsedDefs.add(d.dataset.def);
+      },
+      true,
+    );
+  }
+
+  // Reveal a source line in the editor (switching to the Editor tab, since the
+  // Monaco view is hidden while the Visual tab is open).
+  private jumpToSourceLine(line: number) {
+    if (!this.editor || !Number.isFinite(line)) return;
+    this.setActiveMainTab('editor');
+    this.editor.revealLineInCenter(line);
+    this.editor.setSelection(new monaco.Range(line, 1, line, Number.MAX_SAFE_INTEGER));
+    this.editor.focus();
   }
 
   private beginBusy(message: string) {
@@ -1148,6 +1352,7 @@ class VerdictEditorElement extends HTMLElement {
       this.diagnosticsTimer = null;
       this.runDiagnostics();
       this.runInlineResults();
+      this.markVizDirty();
     }, 250);
   }
 

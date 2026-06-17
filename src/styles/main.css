@@ -55,3 +55,8 @@ body {
   font-style: italic;
   opacity: 0.9;
 }
+
+/* Visual tab: hide the native <details> disclosure marker on definition cards
+   (we use the whole header as the collapse toggle). */
+#verdict-viz-root details > summary { list-style: none; }
+#verdict-viz-root details > summary::-webkit-details-marker { display: none; }

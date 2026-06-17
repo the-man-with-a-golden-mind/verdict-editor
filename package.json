@@ -13,6 +13,8 @@
     "cf:tail": "bunx wrangler tail"
   },
   "dependencies": {
+    "@v_m_v/finvm": "^1.2.0",
+    "@v_m_v/verdict": "^1.1.0",
     "big-integer": "^1.6.52",
     "monaco-editor": "^0.55.1",
     "ps-spa": "file:.ps-spa-repo"
