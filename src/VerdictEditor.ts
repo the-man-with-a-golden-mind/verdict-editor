@@ -1166,6 +1166,30 @@ class VerdictEditorElement extends HTMLElement {
         '  let body = foldl(tickOneAsset, "", assets) in',
         '  if strLength(body) == 0 then "No assets to evaluate."',
         '  else strConcat("=== Verdict tick: statistical multi-asset decisions ===\\n\\n", body)',
+        '',
+        '-- %% cell: $1000 strategy simulation %%',
+        '',
+        '-- Cell 2 reads the price history cell 1 keeps appending and back-tests $1000',
+        '-- with a momentum rule: stay long after an up bar, flat otherwise. It returns',
+        '-- the equity curve (cents), which the notebook renders as a Plotly chart.',
+        '-- Run cell 1 (or enable Live) first so the history has points to simulate.',
+        'simStep : { prevPx : Int, sig : Int, eq : Int, curve : List Int } -> Int -> { prevPx : Int, sig : Int, eq : Int, curve : List Int }',
+        'simStep a px =',
+        '  if a.prevPx == 0 then { prevPx = px, sig = 0, eq = a.eq, curve = append(a.curve, a.eq) }',
+        '  else',
+        '    let ret = px - a.prevPx in',
+        '    let neweq = if a.sig > 0 then a.eq + a.eq * ret / a.prevPx else a.eq in',
+        '    let nsig = if ret > 0 then 1 else 0 in',
+        '    { prevPx = px, sig = nsig, eq = neweq, curve = append(a.curve, neweq) }',
+        '',
+        'simulate : List Int -> List Int',
+        'simulate prices =',
+        '  let r = foldl(simStep, { prevPx = 0, sig = 0, eq = 100000, curve = [] }, prices) in',
+        '  r.curve',
+        '',
+        '-- $1000 = 100000 cents, simulated over the first asset\'s fetched history.',
+        'equityCurve : List Int',
+        'equityCurve = simulate(parseCsvInts(histCsvOrEmpty("BTCUSD")))',
       ].join('\n'),
       language: 'verdict',
       theme: 'verdict-dark',
@@ -2536,7 +2560,17 @@ class VerdictEditorElement extends HTMLElement {
     this.tickInFlight = true;
     this.liveTickCount += 1;
     try {
-      await this.executeProgram(true);
+      // In notebook view, drive the cells (cell 1 fetches+appends history once,
+      // cell 2 re-simulates) instead of the whole-program run — same shared VM.
+      if (
+        this.notebookApi?.runAll &&
+        this.activeMainTab === 'editor' &&
+        this.notebookApi.getViewMode?.() === 'notebook'
+      ) {
+        await this.notebookApi.runAll();
+      } else {
+        await this.executeProgram(true);
+      }
     } finally {
       this.tickInFlight = false;
     }

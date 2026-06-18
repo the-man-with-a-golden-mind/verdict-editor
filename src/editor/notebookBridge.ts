@@ -53,6 +53,8 @@ export type NotebookApi = {
   notebookDocumentSource: () => string;
   setSource: (source: string) => void;
   getViewMode: () => string;
+  /** Re-run every cell (used by the live loop to keep cells updating each tick). */
+  runAll?: () => void | Promise<void>;
 };
 
 type VerdictLib = {

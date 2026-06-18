@@ -38873,7 +38873,17 @@ var reorderBindingFirstInSource = function(src, entryName) {
   }
   if (targetIdx < 0) return src;
   var target = blocks[targetIdx];
-  var rest = blocks.filter(function(_, idx) { return idx !== targetIdx; });
+  // entrypoint when one exists, otherwise the first declaration. So merely
+  // reordering the target to the top is not enough when the program also
+  // defines `main` (e.g. notebook cell 1). Drop the `main` block when the
+  // requested entry is something else so the reordered head wins and the
+  // target binding becomes the entrypoint (its deps stay reachable; main's
+  // own subtree is tree-shaken away).
+  var rest = blocks.filter(function(blk, idx) {
+    if (idx === targetIdx) return false;
+    if (entryName !== 'main' && blockName(blk) === 'main') return false;
+    return true;
+  });
   var headerText = header.join('\n').replace(
     /module\s+([A-Za-z][A-Za-z0-9_]*)\s+exposing\s*\([^)]*\)/,
     function(_m, modName) {

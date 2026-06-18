@@ -264,6 +264,16 @@ function vmRecordToRow(rec) {
   }
   return out;
 }
+function numericLineChart(values, name = "series") {
+  const y = values.map((v) => Number(vmScalarToJson(v))).filter((n) => Number.isFinite(n));
+  return {
+    kind: "chart",
+    title: "",
+    traces: [{ name, kind: "line", x: y.map((_, i) => i), y }],
+    xaxis: { title: "" },
+    yaxis: { title: "" }
+  };
+}
 function vmValueToDisplay(value, typeSig) {
   const js = valueToJs(value);
   if (js && typeof js === "object" && !Array.isArray(js)) {
@@ -273,10 +283,12 @@ function vmValueToDisplay(value, typeSig) {
     }
   }
   const isRecordList = /List\s*\{/.test(typeSig);
+  const isNumericList = /List\s+(Int|Fixed|Rational|Number)\b/.test(typeSig);
   if (Array.isArray(js)) {
     if (isRecordList) {
       return { kind: "table", rows: js.map((item) => vmRecordToRow(item)) };
     }
+    if (isNumericList) return numericLineChart(js);
     return { kind: "text", text: js.map((x) => String(vmScalarToJson(x))).join(", ") };
   }
   if (js && typeof js === "object" && "list" in js) {
@@ -284,6 +296,7 @@ function vmValueToDisplay(value, typeSig) {
     if (isRecordList) {
       return { kind: "table", rows: list.map((item) => vmRecordToRow(item)) };
     }
+    if (isNumericList) return numericLineChart(list);
     if (typeSig.includes("List")) {
       return { kind: "text", text: list.map((x) => String(vmScalarToJson(x))).join(", ") };
     }

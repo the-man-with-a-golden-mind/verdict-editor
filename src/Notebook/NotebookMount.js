@@ -127,16 +127,25 @@ function scanCellBindingNames(source) {
   return names;
 }
 
-function mkGutterRunBtn(cell, idx, onRun) {
-  const runBtn = document.createElement("button");
-  runBtn.type = "button";
-  runBtn.title = "Run cell (⌘↵)";
-  runBtn.dataset.runCell = "1";
-  runBtn.className =
-    "notebook-gutter-btn notebook-gutter-run flex h-8 w-8 shrink-0 items-center justify-center rounded border border-emerald-500/50 bg-emerald-500/20 text-[15px] leading-none text-emerald-300 shadow-sm transition-colors hover:border-emerald-400 hover:bg-emerald-500/35 hover:text-emerald-100";
-  runBtn.textContent = "▶";
-  runBtn.onclick = () => void onRun(cell, idx);
-  return runBtn;
+function mkGutterRunBtn(cell, idx, onRun, onStop, isRunning) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.dataset.runCell = "1";
+  const base =
+    "notebook-gutter-btn notebook-gutter-run flex h-8 w-8 shrink-0 items-center justify-center rounded border text-[14px] leading-none shadow-sm transition-colors ";
+  if (isRunning) {
+    btn.title = "Stop cell";
+    btn.dataset.cellState = "running";
+    btn.className = base + "border-rose-500/60 bg-rose-500/25 text-rose-200 hover:border-rose-400 hover:bg-rose-500/40";
+    btn.textContent = "■";
+    btn.onclick = () => onStop(cell, idx);
+  } else {
+    btn.title = "Run cell (⌘↵)";
+    btn.className = base + "border-emerald-500/50 bg-emerald-500/20 text-emerald-300 hover:border-emerald-400 hover:bg-emerald-500/35 hover:text-emerald-100";
+    btn.textContent = "▶";
+    btn.onclick = () => void onRun(cell, idx);
+  }
+  return btn;
 }
 
 async function renderOutputBlock(block, o, bridge) {
@@ -163,6 +172,8 @@ export function mountNotebookImpl(selector) {
           errors: {},
           cellDiags: {},
           maximizedCellId: null,
+          running: new Set(),
+          runControllers: {},
         };
 
         let seq = 0;
@@ -213,12 +224,24 @@ export function mountNotebookImpl(selector) {
           state.cellDiags = bridge.cellDiagnostics?.(src, cells) ?? {};
         }
 
+        // A `-- %% ... %%` comment line marks a cell boundary in seed source, so a
+        // single default program can seed as several cells. It is a valid Verdict
+        // comment, so Source mode still compiles the whole thing.
+        function splitSeedCells(src) {
+          const parts = String(src || "")
+            .split(/\n--\s*%%[^\n]*%%[^\n]*\n/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+          const sources = parts.length ? parts : [src || ""];
+          return sources.map((s) => ({ id: newId(), kind: "code", source: s, ui: defaultCellUi() }));
+        }
+
         function initFromSource(src) {
           const saved = bridge.loadDocument?.();
           if (saved?.cells?.length) {
             state.cells = saved.cells.map(mapLoadedCell);
           } else {
-            state.cells = [{ id: newId(), kind: "code", source: src || "", ui: defaultCellUi() }];
+            state.cells = splitSeedCells(src);
           }
           publishSource();
         }
@@ -234,6 +257,7 @@ export function mountNotebookImpl(selector) {
             render();
           },
           getViewMode: () => (bridge.isSourceMode?.() ? "source" : "notebook"),
+          runAll: () => runAll(),
         };
 
         const root = document.createElement("div");
@@ -318,13 +342,19 @@ export function mountNotebookImpl(selector) {
         saveVnbBtn.onclick = () => downloadVnb();
 
         const bodyWrap = document.createElement("div");
-        bodyWrap.className = "flex min-h-0 flex-1 flex-col";
+        bodyWrap.className = "flex min-h-0 flex-1 flex-row";
 
         const stack = document.createElement("div");
-        stack.className = "flex-1 min-h-0 overflow-auto px-3 py-3 flex flex-col gap-3";
+        stack.className = "notebook-stack-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-3 py-3 flex flex-col gap-3";
         stack.dataset.notebookStack = "1";
 
+        // Right-side cell navigator (PowerPoint-style page strip).
+        const nav = document.createElement("div");
+        nav.className = "notebook-nav hidden w-44 shrink-0 flex-col gap-1.5 overflow-y-auto border-l border-slate-800 bg-slate-950/70 p-2 lg:flex";
+        nav.dataset.notebookNav = "1";
+
         bodyWrap.appendChild(stack);
+        bodyWrap.appendChild(nav);
 
         function getBridgeSource() {
           return bridge.materialize?.(concatenate()) ?? concatenate();
@@ -346,15 +376,19 @@ export function mountNotebookImpl(selector) {
 
         async function runCell(cell, cellIdx) {
           if (cell.kind !== "code") return;
+          if (state.running.has(cell.id)) return;
+          const controller = new AbortController();
+          state.runControllers[cell.id] = controller;
+          state.running.add(cell.id);
           const ui = ensureUi(cell);
           ui.outputFolded = false;
+          await render(); // reflect running state (Run → Stop)
           const cellNames = bindingNamesForRun(cell);
           const src = getBridgeSource();
           try {
             const chk = bridge.compile?.(src);
             if (chk && !chk.ok) {
               state.errors[cell.id] = chk.error ?? "Compile failed";
-              await render();
               return;
             }
             const prefixNames = [];
@@ -365,10 +399,10 @@ export function mountNotebookImpl(selector) {
             const names = [...new Set(prefixNames.length ? prefixNames : cellNames)];
             if (names.length === 0) {
               state.errors[cell.id] = "";
-              await render();
               return;
             }
-            const outs = await Promise.resolve(bridge.evalCells?.(src, names) ?? []);
+            const outs = await Promise.resolve(bridge.evalCells?.(src, names, controller.signal) ?? []);
+            if (controller.signal.aborted) return;
             let matchedCurrent = false;
             for (const o of outs) {
               for (let i = 0; i <= cellIdx; i++) {
@@ -393,9 +427,70 @@ export function mountNotebookImpl(selector) {
               state.errors[cell.id] = "";
             }
           } catch (e) {
-            state.errors[cell.id] = String(e);
+            if (!controller.signal.aborted) state.errors[cell.id] = String(e);
+          } finally {
+            state.running.delete(cell.id);
+            delete state.runControllers[cell.id];
+            await render();
           }
-          await render();
+        }
+
+        function stopCell(cell) {
+          const controller = state.runControllers[cell.id];
+          if (controller) controller.abort();
+          state.running.delete(cell.id);
+          delete state.runControllers[cell.id];
+          state.errors[cell.id] = "Stopped.";
+          render();
+        }
+
+        async function buildNav() {
+          nav.innerHTML = "";
+          const title = document.createElement("div");
+          title.className = "px-1 pb-1 text-[10px] font-bold uppercase tracking-wide text-slate-500";
+          title.textContent = `Cells · ${state.cells.length}`;
+          nav.appendChild(title);
+          for (let i = 0; i < state.cells.length; i++) {
+            const cell = state.cells[i];
+            const active = state.focusedId === cell.id;
+            const card = document.createElement("button");
+            card.type = "button";
+            card.dataset.navCell = cell.id;
+            card.className =
+              "notebook-nav-card flex flex-col gap-0.5 rounded border px-2 py-1.5 text-left transition-colors " +
+              (active
+                ? "border-indigo-400/60 bg-indigo-500/10"
+                : "border-slate-800 bg-slate-900/60 hover:border-slate-600");
+            const head = document.createElement("div");
+            head.className = "flex items-center justify-between text-[10px] text-slate-500";
+            const label = document.createElement("span");
+            label.textContent = `${i + 1} · ${cell.kind === "wysiwyg" ? "Text" : "Code"}`;
+            head.appendChild(label);
+            if (state.running.has(cell.id)) {
+              const r = document.createElement("span");
+              r.className = "text-rose-300";
+              r.textContent = "● run";
+              head.appendChild(r);
+            } else if (cellHasOutput(cell)) {
+              const d = document.createElement("span");
+              d.className = "text-emerald-400/80";
+              d.textContent = "●";
+              head.appendChild(d);
+            }
+            const prev = document.createElement("div");
+            prev.className = "truncate font-mono text-[11px] text-slate-300";
+            prev.textContent = await getCellPreviewLine(cell);
+            card.appendChild(head);
+            card.appendChild(prev);
+            card.onclick = async () => {
+              state.focusedId = cell.id;
+              await render();
+              stack
+                .querySelector(`[data-cell-id="${cell.id}"]`)
+                ?.scrollIntoView({ behavior: "smooth", block: "center" });
+            };
+            nav.appendChild(card);
+          }
         }
 
         async function runAll() {
@@ -408,6 +503,41 @@ export function mountNotebookImpl(selector) {
           for (let i = 0; i <= cellIdx; i++) {
             await runCell(state.cells[i], i);
           }
+        }
+
+        // --- Cell management (operate on whole cell objects so `ui` is preserved) ---
+        function addCellBelow(idx, kind) {
+          const cell = { id: newId(), kind: kind === "wysiwyg" ? "wysiwyg" : "code", source: "", ui: defaultCellUi() };
+          state.cells.splice(idx + 1, 0, cell);
+          if (cell.kind === "code") state.focusedId = cell.id;
+          publishSource();
+          render();
+        }
+
+        function deleteCellAt(idx) {
+          const cell = state.cells[idx];
+          if (!cell) return;
+          for (const k of Object.keys(state.outputs)) {
+            if (k.startsWith(`${cell.id}:`)) delete state.outputs[k];
+          }
+          delete state.errors[cell.id];
+          state.cells.splice(idx, 1);
+          if (state.focusedId === cell.id) state.focusedId = null;
+          if (state.maximizedCellId === cell.id) state.maximizedCellId = null;
+          if (state.cells.length === 0) {
+            state.cells.push({ id: newId(), kind: "code", source: "", ui: defaultCellUi() });
+          }
+          publishSource();
+          render();
+        }
+
+        function moveCellBy(idx, delta) {
+          const j = Math.max(0, Math.min(state.cells.length - 1, idx + delta));
+          if (j === idx) return;
+          const [cell] = state.cells.splice(idx, 1);
+          state.cells.splice(j, 0, cell);
+          publishSource();
+          render();
         }
 
         function destroyLiveMonaco() {
@@ -477,67 +607,82 @@ export function mountNotebookImpl(selector) {
           return outputKeysForCell(cell).some((n) => state.outputs[`${cell.id}:${n}`]) || Boolean(state.errors[cell.id]);
         }
 
-        function appendCellGutterControls(gutter, cell, idx, ui, isCodeCell, isMax, { compact = false } = {}) {
+        // A single "⋯" overflow menu holds every secondary action, so the gutter
+        // stays just [number] [Run]. Native <details> = no click-outside JS.
+        function buildCellMenu(cell, idx, ui, isCodeCell, isMax) {
+          const details = document.createElement("details");
+          details.className = "notebook-cell-menu relative";
+          const summary = document.createElement("summary");
+          summary.dataset.cellMenu = "1";
+          summary.title = "Cell actions";
+          summary.className =
+            "notebook-gutter-btn flex h-7 w-7 cursor-pointer list-none items-center justify-center rounded border border-slate-700/80 bg-slate-900/80 text-[13px] font-bold text-slate-400 hover:border-slate-500 hover:text-white";
+          summary.textContent = "⋯";
+          details.appendChild(summary);
+
+          const menu = document.createElement("div");
+          menu.dataset.cellActions = "1";
+          menu.className =
+            "notebook-cell-actions absolute left-9 top-0 z-30 flex w-44 flex-col rounded border border-slate-700 bg-slate-900 p-1 text-left shadow-xl";
+
+          const item = (label, fn, extra) => {
+            const b = document.createElement("button");
+            b.type = "button";
+            b.className = "rounded px-2 py-1 text-left text-xs text-slate-300 hover:bg-slate-800 " + (extra ?? "");
+            b.textContent = label;
+            b.onclick = () => {
+              details.open = false;
+              fn();
+            };
+            menu.appendChild(b);
+            return b;
+          };
+          const sep = () => {
+            const d = document.createElement("div");
+            d.className = "my-1 border-t border-slate-800";
+            menu.appendChild(d);
+          };
+
+          item(ui.folded ? "Expand cell" : "Fold cell", () => {
+            ui.folded = !ui.folded;
+            render();
+          });
+          if (isCodeCell && idx > 0) item("Run above", () => void runAbove(idx));
+          item(ui.outputTarget === "inline" ? "Send output to panel" : "Show output inline", () => {
+            ui.outputTarget = ui.outputTarget === "inline" ? "global" : "inline";
+            render();
+          });
+          if (isCodeCell && ui.outputTarget === "inline" && !ui.folded)
+            item(ui.outputFolded ? "Show output" : "Hide output", () => {
+              ui.outputFolded = !ui.outputFolded;
+              render();
+            });
+          item(isMax ? "Minimize" : "Maximize", () => {
+            state.maximizedCellId = isMax ? null : cell.id;
+            if (isMax) state.focusedId = cell.id;
+            render();
+          });
+          sep();
+          item("Insert code below", () => addCellBelow(idx, "code"));
+          item("Insert text below", () => addCellBelow(idx, "wysiwyg"));
+          if (idx > 0) item("Move up", () => moveCellBy(idx, -1));
+          if (idx < state.cells.length - 1) item("Move down", () => moveCellBy(idx, 1));
+          sep();
+          item("Delete cell", () => deleteCellAt(idx), "text-rose-300 hover:bg-rose-500/10");
+
+          details.appendChild(menu);
+          return details;
+        }
+
+        function appendCellGutterControls(gutter, cell, idx, ui, isCodeCell, isMax) {
           const num = document.createElement("span");
           num.className = "text-[10px] font-mono text-slate-500";
           num.textContent = String(idx + 1);
           gutter.appendChild(num);
 
-          if (isCodeCell) {
-            gutter.appendChild(mkGutterRunBtn(cell, idx, runCell));
-            if (idx > 0 && !compact) {
-              const aboveBtn = mkGutterBtn("Run above", "↑", "text-[10px]", { key: "runAbove", value: "1" });
-              aboveBtn.onclick = () => runAbove(idx);
-              gutter.appendChild(aboveBtn);
-            }
-          }
-
-          const foldBtn = mkGutterBtn(ui.folded ? "Expand cell" : "Fold cell", ui.folded ? "▸" : "▾", "");
-          foldBtn.dataset.cellFold = "1";
-          foldBtn.onclick = () => {
-            ui.folded = !ui.folded;
-            render();
-          };
-          gutter.appendChild(foldBtn);
-
-          const outputTargetBtn = mkGutterBtn(
-            ui.outputTarget === "inline" ? "Output below cell" : "Output to right panel",
-            ui.outputTarget === "inline" ? "↓" : "⇱",
-            ui.outputTarget === "global" ? "border-indigo-500/50 text-indigo-200" : "",
-            { key: "outputTarget", value: ui.outputTarget },
-          );
-          outputTargetBtn.onclick = () => {
-            ui.outputTarget = ui.outputTarget === "inline" ? "global" : "inline";
-            render();
-          };
-          gutter.appendChild(outputTargetBtn);
-
-          if (ui.outputTarget === "inline" && !ui.folded) {
-            const outFoldBtn = mkGutterBtn(
-              ui.outputFolded ? "Expand output" : "Fold output",
-              ui.outputFolded ? "⊕" : "⊖",
-              "",
-            );
-            outFoldBtn.dataset.cellOutputFold = "1";
-            outFoldBtn.onclick = () => {
-              ui.outputFolded = !ui.outputFolded;
-              render();
-            };
-            gutter.appendChild(outFoldBtn);
-          }
-
-          const maxBtn = mkGutterBtn(
-            isMax ? "Minimize cell" : "Maximize cell",
-            isMax ? "⊟" : "⛶",
-            isMax ? "border-indigo-500/50 text-indigo-200" : "",
-            { key: isMax ? "minimizeCell" : "maximizeCell", value: "1" },
-          );
-          maxBtn.onclick = () => {
-            state.maximizedCellId = isMax ? null : cell.id;
-            if (isMax) state.focusedId = cell.id;
-            render();
-          };
-          gutter.appendChild(maxBtn);
+          if (isCodeCell)
+            gutter.appendChild(mkGutterRunBtn(cell, idx, runCell, stopCell, state.running.has(cell.id)));
+          gutter.appendChild(buildCellMenu(cell, idx, ui, isCodeCell, isMax));
         }
 
         async function renderFoldedCell(wrap, cell, idx, ui, isCodeCell, isMax) {
@@ -765,6 +910,7 @@ export function mountNotebookImpl(selector) {
           }
 
           await refreshGlobalOutputPanel();
+          await buildNav();
         }
 
         addCodeBtn.onclick = () => {

@@ -76,6 +76,23 @@ function vmRecordToRow(rec: unknown): Record<string, unknown> {
 }
 
 /** Map a FinVM / Verdict JSON value to the Display schema (or plain JSON). */
+// A bare numeric series (e.g. a $1000 equity curve) is far more useful as a line
+// chart than comma-joined text. This lets Verdict cells produce charts today
+// without the (not-yet-landed) Display chart builder — they just return a numeric
+// List and the host charts it.
+function numericLineChart(values: unknown[], name = 'series'): unknown {
+  const y = values
+    .map((v) => Number(vmScalarToJson(v) as unknown))
+    .filter((n) => Number.isFinite(n));
+  return {
+    kind: 'chart',
+    title: '',
+    traces: [{ name, kind: 'line', x: y.map((_, i) => i), y }],
+    xaxis: { title: '' },
+    yaxis: { title: '' },
+  };
+}
+
 export function vmValueToDisplay(value: unknown, typeSig: string): unknown {
   const js = valueToJs(value);
   if (js && typeof js === 'object' && !Array.isArray(js)) {
@@ -86,11 +103,13 @@ export function vmValueToDisplay(value: unknown, typeSig: string): unknown {
   }
 
   const isRecordList = /List\s*\{/.test(typeSig);
+  const isNumericList = /List\s+(Int|Fixed|Rational|Number)\b/.test(typeSig);
 
   if (Array.isArray(js)) {
     if (isRecordList) {
       return { kind: 'table', rows: js.map((item) => vmRecordToRow(item)) };
     }
+    if (isNumericList) return numericLineChart(js);
     return { kind: 'text', text: js.map((x) => String(vmScalarToJson(x))).join(', ') };
   }
 
@@ -99,6 +118,7 @@ export function vmValueToDisplay(value: unknown, typeSig: string): unknown {
     if (isRecordList) {
       return { kind: 'table', rows: list.map((item) => vmRecordToRow(item)) };
     }
+    if (isNumericList) return numericLineChart(list);
     if (typeSig.includes('List')) {
       return { kind: 'text', text: list.map((x) => String(vmScalarToJson(x))).join(', ') };
     }
