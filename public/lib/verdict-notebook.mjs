@@ -38821,7 +38821,6 @@ var compileJS = function(src) {
   ;
   throw new Error("Failed pattern match at Verdict.Compiler (line 143, column 17 - line 145, column 52): " + [v.constructor.name]);
 };
-
 var compileBindingsJS = function(src) {
   var v = compileBindings(src);
   if (v instanceof Right) {
@@ -38844,7 +38843,7 @@ var evalBindingsJsonJS = function(src, names) {
   var filterNames = names && names.length ? names : null;
   var nullary = function(mod5) {
     return mapMaybe(function(v2) {
-      var $93 = $null(v2.params);
+      var $93 = $$null(v2.params);
       if ($93) {
         return new Just(v2.name);
       }
@@ -38906,6 +38905,7 @@ var evalBindingsJsonJS = function(src, names) {
   }
   return [];
 };
+
 export {
   compile2 as compile,
   compileJS,

@@ -21,8 +21,20 @@ function bindingNames(source) {
   return names;
 }
 
-function isDefinitionOnly(source) {
-  return bindingNames(source).length === 0;
+function makeBindingHelpers(bridge) {
+  function bindingNamesForCell(cell, allCells, getSource) {
+    const cells = allCells.map((c) => ({ id: c.id, kind: c.kind, source: c.source }));
+    if (bridge?.bindingNamesInCell) {
+      return bridge.bindingNamesInCell(cell.id, cells, getSource());
+    }
+    return bindingNames(cell.source);
+  }
+
+  function isDefinitionOnlyCell(cell, allCells, getSource) {
+    return bindingNamesForCell(cell, allCells, getSource).length === 0;
+  }
+
+  return { bindingNamesForCell, isDefinitionOnlyCell };
 }
 
 let liveMonaco = null;
@@ -50,6 +62,8 @@ export function mountNotebookImpl(selector) {
       return function () {
         const host = document.querySelector(selector);
         if (!host || !bridge) return null;
+
+        const { bindingNamesForCell, isDefinitionOnlyCell } = makeBindingHelpers(bridge);
 
         const state = {
           cells: [],
@@ -213,12 +227,12 @@ export function mountNotebookImpl(selector) {
         }
 
         async function runCell(cell, cellIdx) {
-          if (cell.kind !== "code" || isDefinitionOnly(cell.source)) return;
-          const cellNames = bindingNames(cell.source);
+          if (cell.kind !== "code" || isDefinitionOnlyCell(cell, state.cells, concatenate)) return;
+          const cellNames = bindingNamesForCell(cell, state.cells, concatenate);
           const prefixNames = [];
           for (let i = 0; i <= cellIdx; i++) {
             const c = state.cells[i];
-            if (c.kind === "code") prefixNames.push(...bindingNames(c.source));
+            if (c.kind === "code") prefixNames.push(...bindingNamesForCell(c, state.cells, concatenate));
           }
           const names = prefixNames.length ? prefixNames : cellNames;
           const src = getBridgeSource();
@@ -271,7 +285,7 @@ export function mountNotebookImpl(selector) {
           num.textContent = String(idx + 1);
           gutter.appendChild(num);
 
-          if (cell.kind === "code" && !isDefinitionOnly(cell.source)) {
+          if (cell.kind === "code" && !isDefinitionOnlyCell(cell, state.cells, concatenate)) {
             const runBtn = document.createElement("button");
             runBtn.type = "button";
             runBtn.className =
@@ -355,7 +369,7 @@ export function mountNotebookImpl(selector) {
           const outHost = document.createElement("div");
           outHost.className = "border-t border-slate-800 px-3 py-2 notebook-output";
           outHost.dataset.cellOutput = cell.id;
-          for (const n of bindingNames(cell.source)) {
+          for (const n of bindingNamesForCell(cell, state.cells, concatenate)) {
             const key = `${cell.id}:${n}`;
             if (state.outputs[key]) {
               const o = state.outputs[key];

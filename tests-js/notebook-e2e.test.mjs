@@ -79,19 +79,50 @@ rows = [{ val = "a" }, { val = "b,b" }]
   });
   assertOk(tableOk, "table cell should contain row data");
 
-  const csv = await page.evaluate(() => {
-    const table = document.querySelector("[data-notebook-table]");
-    if (!table) return "";
-    const cols = [...table.querySelectorAll("thead th")].map((th) => th.textContent ?? "");
-    const rows = [...table.querySelectorAll("tbody tr")].map((tr) =>
-      [...tr.querySelectorAll("td")].map((td) => td.textContent ?? ""),
-    );
-    const esc = (s) => (/[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
-    const header = cols.map(esc).join(",");
-    const body = rows.map((r) => r.map(esc).join(",")).join("\n");
-    return body ? `${header}\n${body}` : header;
+  const clipCsv = await page.evaluate(async () => {
+    const btn = document.querySelector("[data-copy-csv]");
+    if (!btn) return "";
+    let written = "";
+    const orig = navigator.clipboard.writeText.bind(navigator.clipboard);
+    navigator.clipboard.writeText = (text) => {
+      written = text;
+      return Promise.resolve();
+    };
+    btn.click();
+    await new Promise((r) => setTimeout(r, 50));
+    navigator.clipboard.writeText = orig;
+    return written;
   });
-  assertOk(csv.includes("val") && csv.includes("a"), `table CSV got: ${csv}`);
+  assertOk(clipCsv.includes("val") && clipCsv.includes("a"), `clipboard CSV: ${clipCsv}`);
+
+  await page.evaluate(async () => {
+    const res = await fetch("/lib/notebook.mjs");
+    const blob = URL.createObjectURL(new Blob([await res.text()], { type: "text/javascript" }));
+    const mod = await import(blob);
+    URL.revokeObjectURL(blob);
+    const host = document.createElement("div");
+    document.querySelector("[data-notebook-root]")?.appendChild(host);
+    await mod.renderDisplayInto(
+      host,
+      {
+        kind: "stack",
+        items: [
+          { kind: "text", text: "stack line" },
+          { kind: "table", rows: [{ k: "v" }] },
+        ],
+      },
+      {},
+    );
+  });
+  await page.waitForSelector("[data-notebook-stack]", { timeout: 5000 });
+  const stackOk = await page.evaluate(() => {
+    const stacks = [...document.querySelectorAll("[data-notebook-stack]")];
+    return stacks.some(
+      (stack) =>
+        !!stack.querySelector(".notebook-text-output") && !!stack.querySelector("[data-notebook-table]"),
+    );
+  });
+  assertOk(stackOk, "stack should render nested text and table");
 
   await page.evaluate(async () => {
     const res = await fetch("/lib/notebook.mjs");
@@ -127,11 +158,20 @@ rows = [{ val = "a" }, { val = "b,b" }]
 
   await clickButton(page, "+ Text");
   await page.waitForSelector("[data-wysiwyg]", { timeout: 5000 });
+  const wysiwygOk = await page.evaluate(() => {
+    const host = document.querySelector("[data-wysiwyg]");
+    return !!host?.querySelector("[contenteditable]") && !host.querySelector("textarea");
+  });
+  assertOk(wysiwygOk, "WYSIWYG shows rich text without raw Markdown");
 
   await clickButton(page, "Notebook ⇄ Source");
-  await delay(500);
-  const inSource = await page.evaluate(() => !document.querySelector("[data-notebook-stack]")?.checkVisibility?.() ?? true);
-  assertOk(inSource || document.querySelector(".monaco-editor"), "Source mode");
+  await delay(800);
+  await page.waitForSelector(".monaco-editor", { timeout: 10000 });
+  const sourceText = await page.evaluate(() => {
+    const lines = [...document.querySelectorAll(".monaco-editor .view-line")].map((el) => el.textContent ?? "");
+    return lines.join("\n");
+  });
+  assertOk(sourceText.includes("rows") && sourceText.includes("List"), `Source mode should show concatenated program: ${sourceText.slice(0, 120)}`);
 
   await clickButton(page, "Notebook ⇄ Source");
   await delay(500);

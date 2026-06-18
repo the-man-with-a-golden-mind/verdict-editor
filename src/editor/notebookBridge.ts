@@ -30,6 +30,12 @@ export type NotebookBridge = {
   /** Load / save `.vnb` document JSON. */
   loadDocument: () => { cells: NotebookCellInfo[] } | null;
   saveDocument: (doc: { cells: NotebookCellInfo[] }) => void;
+  /** Binding names in a cell (astJS when available, else line scan). */
+  bindingNamesInCell: (
+    cellId: string,
+    cells: NotebookCellInfo[],
+    fullSource: string,
+  ) => string[];
 };
 
 export type NotebookApi = {
@@ -63,6 +69,7 @@ export function createNotebookBridge(deps: {
   cellDiagnostics: NotebookBridge['cellDiagnostics'];
   loadDocument: NotebookBridge['loadDocument'];
   saveDocument: NotebookBridge['saveDocument'];
+  bindingNamesInCell: NotebookBridge['bindingNamesInCell'];
 }): NotebookBridge {
   let plotlyPromise: Promise<unknown> | null = null;
   let sourceMode = false;
@@ -107,6 +114,7 @@ export function createNotebookBridge(deps: {
     cellDiagnostics: deps.cellDiagnostics,
     loadDocument: deps.loadDocument,
     saveDocument: deps.saveDocument,
+    bindingNamesInCell: deps.bindingNamesInCell,
   };
 }
 

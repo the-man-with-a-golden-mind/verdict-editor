@@ -33,6 +33,7 @@ import {
   mapDiagnosticsToCells,
   wrapVerdictLibForNotebook,
 } from './editor/notebookEval';
+import { bindingNamesInCell as resolveNotebookBindingNames } from './editor/notebookBindings';
 import { extractDocs, gasFromBytecode, renderCallGraph, type GasInfo } from './editor/vizGraph';
 
 declare global {
@@ -1213,6 +1214,7 @@ class VerdictEditorElement extends HTMLElement {
   private async initNotebook() {
     if (this.isDebugView() || !this.notebookHost) return;
     try {
+      await loadAstLib();
       const bridge = createNotebookBridge({
         vlib,
         materialize: (source) => this.materializeInputs(source),
@@ -1265,6 +1267,13 @@ class VerdictEditorElement extends HTMLElement {
         },
         loadDocument: () => loadVnbFromStorage(),
         saveDocument: (doc) => saveVnbToStorage(doc),
+        bindingNamesInCell: (cellId, cells, source) =>
+          resolveNotebookBindingNames(
+            cellId,
+            cells.map((c) => ({ id: c.id, kind: c.kind, source: c.source, startLine: 0 })),
+            this.materializeInputs(source),
+            astLib,
+          ),
       });
       const lib = await loadNotebookLib();
       this.notebookApi = lib.mountNotebook(
