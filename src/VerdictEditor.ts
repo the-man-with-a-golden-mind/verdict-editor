@@ -21,6 +21,18 @@ import {
   toVerdictLiteral,
 } from './editor/runtimeUtils';
 import { installArrowOverlay } from './editor/vizArrows';
+import {
+  createNotebookBridge,
+  loadNotebookLib,
+  loadVnbFromStorage,
+  saveVnbToStorage,
+  type NotebookApi,
+} from './editor/notebookBridge';
+import {
+  evalNotebookCells,
+  mapDiagnosticsToCells,
+  wrapVerdictLibForNotebook,
+} from './editor/notebookEval';
 import { extractDocs, gasFromBytecode, renderCallGraph, type GasInfo } from './editor/vizGraph';
 
 declare global {
@@ -157,9 +169,10 @@ function loadVerdictLibs(): Promise<void> {
   if (!libsPromise) {
     libsPromise = Promise.all([
       importPublicModule('/lib/verdict.mjs'),
+      importPublicModule('/lib/verdict-notebook.mjs'),
       importPublicModule('/lib/finvm.mjs'),
-    ]).then(([v, f]) => {
-      vlib = v;
+    ]).then(([v, vn, f]) => {
+      vlib = wrapVerdictLibForNotebook(v, vn);
       finvmLib = f;
     });
   }
@@ -426,6 +439,10 @@ class VerdictEditorElement extends HTMLElement {
   private minardLoaded = false;
   private minardLoading: Promise<boolean> | null = null;
   private built = false;
+  private notebookHost: HTMLDivElement | null = null;
+  private notebookApi: NotebookApi | null = null;
+  private syncingNotebook = false;
+  private notebookSourceMode = false;
 
   protected isDebugView(): boolean {
     return false;
@@ -485,7 +502,12 @@ class VerdictEditorElement extends HTMLElement {
 
     leftPane.appendChild(editorHeader);
     leftPane.appendChild(mainTabBar);
+    this.notebookHost = document.createElement('div');
+    this.notebookHost.id = 'verdict-notebook-host';
+    this.notebookHost.className = 'flex-1 min-h-0 overflow-hidden';
+    leftPane.appendChild(this.notebookHost);
     leftPane.appendChild(this.container);
+    this.container.classList.add('hidden');
     this.dbPanel = document.createElement('div');
     this.dbPanel.className = 'hidden flex-1 min-h-0 overflow-auto bg-[#0b0f1a] p-3';
     const dbWrap = document.createElement('div');
@@ -1158,8 +1180,105 @@ class VerdictEditorElement extends HTMLElement {
     this.refreshDbQueryOutput();
     this.setActiveMainTab(this.isDebugView() ? 'debug' : 'editor');
     this.setActiveSideTab('output');
+    await this.initNotebook();
     this.runDiagnostics();
     this.runInlineResults();
+  }
+
+  private getProgramSource(): string {
+    if (this.notebookApi) return this.notebookApi.notebookSource();
+    return this.editor?.getValue() ?? '';
+  }
+
+  private getVisualizationSource(): string {
+    if (this.notebookApi?.notebookDocumentSource) {
+      return this.notebookApi.notebookDocumentSource();
+    }
+    return this.getProgramSource();
+  }
+
+  private onNotebookProgramChanged(source: string) {
+    if (this.editor && !this.syncingNotebook) {
+      this.syncingNotebook = true;
+      try {
+        if (this.editor.getValue() !== source) this.editor.setValue(source);
+      } finally {
+        this.syncingNotebook = false;
+      }
+    }
+    this.scheduleUpdate();
+    this.markVizDirty();
+  }
+
+  private async initNotebook() {
+    if (this.isDebugView() || !this.notebookHost) return;
+    try {
+      const bridge = createNotebookBridge({
+        vlib,
+        materialize: (source) => this.materializeInputs(source),
+        onProgramChanged: (source) => this.onNotebookProgramChanged(source),
+        evalCells: (source, names) => {
+          if (!vlib || !finvmLib) return [];
+          return evalNotebookCells(
+            {
+              vlib,
+              finvm: finvmLib as FinVmModule,
+              getFinvmState: () => this.finvmState,
+              setFinvmState: (s) => {
+                this.finvmState = s;
+              },
+              getEffectStorage: () => this.effectStorage ?? createEffectStorage(),
+              setEffectStorage: (s) => {
+                this.effectStorage = s;
+              },
+              materialize: (s) => this.materializeInputs(s),
+            },
+            source,
+            names,
+          );
+        },
+        setSourceMode: (on) => {
+          this.notebookSourceMode = on;
+          if (!this.notebookHost || !this.container) return;
+          this.notebookHost.classList.toggle('hidden', on);
+          this.container.classList.toggle('hidden', !on);
+          if (on) {
+            this.editor?.setValue(this.getProgramSource());
+            this.editor?.layout();
+          } else {
+            const src = this.editor?.getValue() ?? '';
+            this.notebookApi?.setSource(src);
+          }
+        },
+        isSourceMode: () => this.notebookSourceMode,
+        cellDiagnostics: (source, cells) => {
+          if (!vlib) return {};
+          const src = this.materializeInputs(source);
+          const diags = vlib.diagnosticsJS(src);
+          const refs = cells.map((c, i) => ({
+            id: c.id,
+            kind: c.kind,
+            source: c.source,
+            startLine: 0,
+          }));
+          return mapDiagnosticsToCells(diags, refs);
+        },
+        loadDocument: () => loadVnbFromStorage(),
+        saveDocument: (doc) => saveVnbToStorage(doc),
+      });
+      const lib = await loadNotebookLib();
+      this.notebookApi = lib.mountNotebook(
+        '#verdict-notebook-host',
+        bridge,
+        this.editor?.getValue() ?? '',
+      );
+    } catch (e) {
+      console.error('Notebook failed to load:', e);
+      this.notebookHost.innerHTML =
+        `<div class="p-4 text-rose-400 text-sm">Notebook failed to load: ${escapeHtml(String(e))}</div>`;
+      this.container.classList.remove('hidden');
+      if (this.notebookHost) this.notebookHost.classList.add('hidden');
+    }
   }
 
   private setActiveSideTab(tab: 'output' | 'inputs') {
@@ -1183,7 +1302,16 @@ class VerdictEditorElement extends HTMLElement {
 
   private setActiveMainTab(tab: 'editor' | 'db' | 'debug' | 'visual') {
     this.activeMainTab = tab;
-    this.container.classList.toggle('hidden', tab !== 'editor');
+    const editorVisible = tab === 'editor';
+    if (this.notebookSourceMode && editorVisible) {
+      this.container.classList.remove('hidden');
+      if (this.notebookHost) this.notebookHost.classList.add('hidden');
+    } else {
+      this.container.classList.toggle('hidden', true);
+      if (this.notebookHost) {
+        this.notebookHost.classList.toggle('hidden', !editorVisible);
+      }
+    }
     if (this.dbPanel) {
       this.dbPanel.classList.toggle('hidden', tab !== 'db');
     }
@@ -1228,7 +1356,7 @@ class VerdictEditorElement extends HTMLElement {
           '<div class="p-4 text-slate-500 italic">Code view unavailable: <code>/lib/verdict-ast.mjs</code> has no <code>astJS</code> export. See docs/visualization-tab-design.md.</div>';
         return;
       }
-      const source = this.materializeInputs(this.editor.getValue());
+      const source = this.materializeInputs(this.getVisualizationSource());
       const res = astLib.astJS(source);
       this.vizCleanup?.();
       this.vizCleanup = null;
@@ -1367,7 +1495,7 @@ class VerdictEditorElement extends HTMLElement {
     if (!vlib) return;
     let diagnostics: VerdictDiagnostic[];
     try {
-      diagnostics = vlib.diagnosticsJS(this.materializeInputs(model.getValue()));
+      diagnostics = vlib.diagnosticsJS(this.materializeInputs(this.getProgramSource()));
     } catch {
       // A compiler crash shouldn't wipe the editor; just skip this pass.
       return;
@@ -1418,7 +1546,7 @@ class VerdictEditorElement extends HTMLElement {
     if (!vlib) return;
     let results: VerdictBindingResult[];
     try {
-      results = vlib.evalBindingsJS(this.materializeInputs(model.getValue()));
+      results = vlib.evalBindingsJS(this.materializeInputs(this.getProgramSource()));
     } catch {
       this.resultDecorations.clear();
       return;
@@ -1466,7 +1594,7 @@ class VerdictEditorElement extends HTMLElement {
   private async executeProgram(persistState: boolean) {
     if (!this.editor) return;
     this.beginBusy(persistState ? 'Running strategy...' : 'Compiling and running...');
-    const code = this.materializeInputs(this.editor.getValue());
+    const code = this.materializeInputs(this.getProgramSource());
     if (!persistState) {
       this.renderOutput('Compiling', 'info');
     }
@@ -1976,7 +2104,7 @@ class VerdictEditorElement extends HTMLElement {
     let compiledProgram: { functions?: Record<string, { instructions?: unknown[] }> } | null = null;
     if (this.editor && vlib) {
       try {
-        const source = this.materializeInputs(this.editor.getValue());
+        const source = this.materializeInputs(this.getProgramSource());
         const compilation = vlib.compileJS(source);
         if (compilation?.ok) {
           compiledProgram = JSON.parse(compilation.output) as { functions?: Record<string, { instructions?: unknown[] }> };
