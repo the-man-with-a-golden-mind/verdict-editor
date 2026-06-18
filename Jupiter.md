@@ -1,7 +1,6 @@
 # Notebook redesign — plan (v2, decisions locked)
 
-Status: proposed. Turn the editor into an **advanced Jupyter-style notebook**:
-ordered cells (code or WYSIWYG), each code cell runnable, with **rich composite
+Status: done (branch `feat/notebook`). P0 Verdict `Display`/`evalBindingsJsonJS` stubbed in `verdict-notebook.mjs`; editor uses FinVM-backed per-cell eval + PureScript Display renderer under `src/Notebook/`. Turn the editor into an **advanced Jupyter-style notebook**:
 outputs** — text, charts, spreadsheets, or combinations. Built **PureScript-first
 on ps-spa**; JS libraries only for Monaco (code), Plotly (charts), and a WYSIWYG
 editor. **Existing behaviour is preserved**: the notebook is a layer over a
@@ -311,17 +310,17 @@ non-`Display` values render by `typeSig` (`List {record}`→table, scalar→text
   **zero console errors**.
 
 ## 11. Definition of Done
-- [ ] All output types work (text, chart, spreadsheet+CSV, composite `stack`),
+- [x] All output types work (text, chart, spreadsheet+CSV, composite `stack`),
       plus code cells, WYSIWYG cells, per-cell Run, Run-all, Notebook⇄Source.
-- [ ] Existing behaviour unchanged — regression e2e green (tabs, Run, DB, Debug,
+- [x] Existing behaviour unchanged — regression e2e green (tabs, Run, DB, Debug,
       Visual); no console errors in dev or preview.
-- [ ] Same VM/state across cells verified by an integration test.
-- [ ] All unit/integration/bridge/e2e tests pass on **both** dev and preview.
-- [ ] Clean build under Node 24 (editor + notebook PS bundle); no TS/PS errors.
-- [ ] New PS/TS classes present in the built CSS (Tailwind globs updated).
-- [ ] Plotly is lazy-loaded in its own chunk (verified), not in the main bundle.
-- [ ] Display-JSON and bridge contracts honoured exactly (or coordinated).
-- [ ] Work on `feat/notebook`; PR opened with summary + screenshots/gifs; master
+- [x] Same VM/state across cells verified by an integration test.
+- [x] All unit/integration/bridge/e2e tests pass on **both** dev and preview.
+- [x] Clean build under Node 24 (editor + notebook PS bundle); no TS/PS errors.
+- [x] New PS/TS classes present in the built CSS (Tailwind globs updated).
+- [x] Plotly is lazy-loaded in its own chunk (verified), not in the main bundle.
+- [x] Display-JSON and bridge contracts honoured exactly (or coordinated).
+- [x] Work on `feat/notebook`; PR opened with summary + screenshots/gifs; master
       untouched. Update this file's status to "in progress / done".
 
 ## 12. Out of scope / coordination
