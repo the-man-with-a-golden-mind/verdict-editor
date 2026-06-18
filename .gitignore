@@ -3,6 +3,10 @@ dist/
 output/
 .spago/
 .spago-output/
+.psc-ide-port
+src/Notebook/src/
+src/Notebook/output/
+public/lib/verdict-bindings-patched.mjs
 .wrangler/
 .cache/
 .DS_Store
