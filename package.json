@@ -10,14 +10,26 @@
     "cf:whoami": "bunx wrangler whoami",
     "cf:dev": "bunx wrangler dev",
     "cf:deploy": "npm run build && bunx wrangler deploy",
-    "cf:tail": "bunx wrangler tail"
+    "build:notebook": "node scripts/build-notebook.mjs",
+    "build:verdict-notebook": "node scripts/patch-verdict-bindings.mjs",
+    "build:all": "npm run build:verdict-notebook && npm run build:notebook && npm run build",
+    "build:test-eval": "node scripts/build-test-eval.mjs",
+    "test:notebook": "npm run build:test-eval && node --test tests-js/notebook-unit.test.mjs tests-js/notebook-bridge.test.mjs tests-js/notebook-integration.test.mjs tests-js/notebook-vm-integration.test.mjs tests-js/notebook-display.test.mjs",
+    "test:e2e:notebook": "npm run build:all && node tests-js/notebook-e2e.test.mjs",
+    "test:e2e:regression": "npm run build:all && node tests-js/regression-e2e.test.mjs"
   },
   "dependencies": {
+    "@tiptap/core": "^3.27.0",
+    "@tiptap/pm": "^3.27.0",
+    "@tiptap/starter-kit": "^3.27.0",
     "@v_m_v/finvm": "^1.2.0",
     "@v_m_v/verdict": "^1.1.0",
     "big-integer": "^1.6.52",
+    "marked": "^18.0.5",
     "monaco-editor": "^0.55.1",
-    "ps-spa": "file:.ps-spa-repo"
+    "plotly.js-dist-min": "^2.35.3",
+    "ps-spa": "file:.ps-spa-repo",
+    "turndown": "^7.2.4"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.1",

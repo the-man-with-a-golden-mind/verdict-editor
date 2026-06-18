@@ -1,0 +1,1 @@
+/Users/michalmajchrzak/Projects/fin/editor/src/Notebook/PlotlyFFI.purs

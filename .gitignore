@@ -1,0 +1,25 @@
+node_modules/
+dist/
+output/
+.spago/
+.spago-output/
+.wrangler/
+.cache/
+.DS_Store
+*.log
+.env
+.env.*
+
+# Local clones / working repos (each has its own .git, used during dev)
+.finvm-repo/
+.ps-spa-repo/
+.verdict-repo/
+.upstream/
+
+# Sandbox / scratch environment dirs
+.home/
+.local/
+.tmp-*/
+
+# Generated package tarballs (npm/bun pack output)
+*.tgz

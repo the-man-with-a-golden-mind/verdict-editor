@@ -1,0 +1,15 @@
+package:
+  name: notebook
+  dependencies:
+    - arrays
+    - effect
+    - foldable-traversable
+    - foreign
+    - integers
+    - maybe
+    - prelude
+    - strings
+
+workspace:
+  packageSet:
+    registry: 55.0.0

@@ -25,6 +25,7 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
+          if (id.includes("plotly.js-dist-min")) return "plotly";
           if (!id.includes("node_modules/monaco-editor/esm/")) return;
           // Keep Monaco in one chunk to avoid runtime TDZ/circular init issues
           // caused by aggressive cross-chunk splitting.
