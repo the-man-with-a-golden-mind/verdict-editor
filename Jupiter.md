@@ -1,6 +1,7 @@
 # Notebook redesign — plan (v2, decisions locked)
 
 Status: done (branch `feat/notebook`). P0 Verdict `Display`/`evalBindingsJsonJS` stubbed in `verdict-notebook.mjs`; editor uses FinVM-backed per-cell eval + PureScript Display renderer under `src/Notebook/`. Turn the editor into an **advanced Jupyter-style notebook**:
+ordered cells (code or WYSIWYG), each code cell runnable, with **rich composite
 outputs** — text, charts, spreadsheets, or combinations. Built **PureScript-first
 on ps-spa**; JS libraries only for Monaco (code), Plotly (charts), and a WYSIWYG
 editor. **Existing behaviour is preserved**: the notebook is a layer over a
