@@ -60,3 +60,71 @@ body {
    (we use the whole header as the collapse toggle). */
 #verdict-viz-root details > summary { list-style: none; }
 #verdict-viz-root details > summary::-webkit-details-marker { display: none; }
+
+/* ── Notebook chunks ─────────────────────────────────────────────────────────── */
+.notebook-cell-gutter .notebook-gutter-btn[data-run-cell="1"],
+.notebook-cell-gutter .notebook-gutter-run {
+  border-color: rgb(16 185 129 / 0.4);
+  color: rgb(167 243 208);
+}
+
+.notebook-cell-gutter .notebook-gutter-run {
+  min-width: 2rem;
+  min-height: 2rem;
+}
+
+.notebook-cell-gutter--folded .notebook-gutter-btn:not(.notebook-gutter-run) {
+  height: 1.5rem;
+  width: 1.5rem;
+  min-width: 0;
+  padding: 0;
+  font-size: 10px;
+}
+
+.notebook-cell-gutter--folded .notebook-gutter-run {
+  width: 2rem;
+  height: 2rem;
+  min-width: 2rem;
+  min-height: 2rem;
+  padding: 0;
+}
+
+.notebook-output--folded {
+  font-size: 0.75rem;
+}
+
+.notebook-cell--maximized {
+  min-height: calc(100% - 0.5rem);
+  display: flex;
+  flex-direction: column;
+}
+
+.notebook-stack--maximized {
+  padding: 0.5rem !important;
+}
+
+.notebook-cell-editor-resizer,
+.notebook-cell-output-resizer {
+  height: 6px;
+  cursor: row-resize;
+  background: linear-gradient(to bottom, transparent, rgb(30 41 59 / 0.5), transparent);
+  flex-shrink: 0;
+}
+
+.notebook-cell-editor-resizer:hover,
+.notebook-cell-output-resizer:hover {
+  background: linear-gradient(to bottom, transparent, rgb(99 102 241 / 0.45), transparent);
+}
+
+.notebook-global-output-side {
+  min-height: 3rem;
+}
+
+body.notebook-resize-active {
+  cursor: row-resize !important;
+  user-select: none;
+}
+
+body.notebook-resize-active * {
+  cursor: row-resize !important;
+}

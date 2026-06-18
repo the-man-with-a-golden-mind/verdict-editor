@@ -7,10 +7,16 @@ import {
   type EffectStorage,
 } from './effectDriver';
 import type { CellOutput } from './notebookBridge';
+import { filterCellBindingNamesToRunnable } from './notebookBindings';
 
 type VerdictLib = {
   compileJS: (src: string) => { ok: boolean; output: string; error: string };
   compileBindingsJS?: (src: string) => { ok: boolean; output: string; error: string };
+  compileBindingEntryJS?: (
+    src: string,
+    entryName: string,
+  ) => { ok: boolean; output: string; error: string };
+  nullaryBindingsJS?: (src: string) => string[];
   diagnosticsJS: (src: string) => Array<{ line: number; column: number; message: string; severity: string }>;
   evalBindingsJS: (src: string) => Array<{ name: string; ok: boolean; value: string; error: string }>;
   evalBindingsJsonJS?: (src: string, names?: string[]) => Array<{
@@ -146,7 +152,12 @@ export function mapDiagnosticsToCells(
 function compileNotebookProgram(
   vlib: VerdictLib,
   src: string,
+  bindingName?: string,
 ): { ok: true; output: string } | { ok: false; error: string } {
+  if (bindingName && typeof vlib.compileBindingEntryJS === 'function') {
+    const r = vlib.compileBindingEntryJS(src, bindingName);
+    return r.ok ? { ok: true, output: r.output } : { ok: false, error: r.error };
+  }
   if (typeof vlib.compileBindingsJS === 'function') {
     const r = vlib.compileBindingsJS(src);
     return r.ok ? { ok: true, output: r.output } : { ok: false, error: r.error };
@@ -244,8 +255,27 @@ export async function evalNotebookCells(
     seen.add(n);
     return true;
   });
-  for (const name of orderedNames) {
-    const run = await runBindingOnFinvm(ctx.finvm, compilation.output, name, state, storage);
+  const userNullary = ctx.vlib.nullaryBindingsJS?.(src) ?? null;
+  const usePerBindingCompile = typeof ctx.vlib.compileBindingEntryJS === 'function';
+  const runnableNames = usePerBindingCompile
+    ? orderedNames.filter((n) => !userNullary || userNullary.includes(n))
+    : filterCellBindingNamesToRunnable(compilation.output, orderedNames);
+
+  for (const name of runnableNames) {
+    const bindingCompile = usePerBindingCompile
+      ? compileNotebookProgram(ctx.vlib, src, name)
+      : compilation;
+    if (!bindingCompile.ok) {
+      outputs.push({ name, ok: false, typeSig: sigOf(name), error: bindingCompile.error });
+      continue;
+    }
+    const run = await runBindingOnFinvm(
+      ctx.finvm,
+      bindingCompile.output,
+      name,
+      state,
+      storage,
+    );
     if (!run.ok) {
       outputs.push({ name, ok: false, typeSig: sigOf(name), error: run.error });
       continue;
@@ -271,6 +301,20 @@ export function wrapVerdictLibForNotebook(
   vlib: VerdictLib,
   notebookLib: VerdictLib | null,
 ): VerdictLib {
-  if (!notebookLib?.compileBindingsJS) return vlib;
-  return { ...vlib, compileBindingsJS: notebookLib.compileBindingsJS.bind(notebookLib) };
+  if (!notebookLib) return vlib;
+  return {
+    ...vlib,
+    ...(notebookLib.compileBindingsJS
+      ? { compileBindingsJS: notebookLib.compileBindingsJS.bind(notebookLib) }
+      : {}),
+    ...(notebookLib.compileBindingEntryJS
+      ? { compileBindingEntryJS: notebookLib.compileBindingEntryJS.bind(notebookLib) }
+      : {}),
+    ...(notebookLib.nullaryBindingsJS
+      ? { nullaryBindingsJS: notebookLib.nullaryBindingsJS.bind(notebookLib) }
+      : {}),
+    ...(notebookLib.evalBindingsJsonJS
+      ? { evalBindingsJsonJS: notebookLib.evalBindingsJsonJS.bind(notebookLib) }
+      : {}),
+  };
 }

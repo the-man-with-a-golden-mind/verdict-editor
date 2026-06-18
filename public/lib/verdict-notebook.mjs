@@ -38821,8 +38821,78 @@ var compileJS = function(src) {
   ;
   throw new Error("Failed pattern match at Verdict.Compiler (line 143, column 17 - line 145, column 52): " + [v.constructor.name]);
 };
-var compileBindingsJS = function(src) {
-  var v = compileBindings(src);
+var nullaryUserBindingNames = function(src) {
+  var v = parseVerdict(src);
+  if (v instanceof Left) {
+    return [];
+  }
+  return mapMaybe(function(v2) {
+    var $93 = $$null(v2.params);
+    if ($93) {
+      return new Just(v2.name);
+    }
+    return Nothing.value;
+  })(moduleDecls(v.value0));
+};
+var reorderBindingFirstInSource = function(src, entryName) {
+  var lines = src.split(/\n/);
+  var header = [];
+  var i = 0;
+  while (i < lines.length) {
+    var t = lines[i].trim();
+    if (t.startsWith('module ') || t === '') {
+      header.push(lines[i]);
+      i += 1;
+      continue;
+    }
+    break;
+  }
+  var body = lines.slice(i).join('\n');
+  var blocks = body.split(/\n\s*\n/).map(function(b) { return b.trim(); }).filter(Boolean);
+  var blockName = function(block) {
+    var rows = block.split('\n');
+    for (var r = 0; r < rows.length; r += 1) {
+      var t = rows[r].trim();
+      if (!t || t.startsWith('--')) continue;
+      var eq = t.indexOf(' =');
+      if (eq > 0) return t.slice(0, eq).trim();
+      var col = t.indexOf(' :');
+      if (col > 0) return t.slice(0, col).trim();
+      var sp = t.indexOf(' ');
+      if (sp > 0) return t.slice(0, sp).trim();
+      return t;
+    }
+    return '';
+  };
+  var targetIdx = -1;
+  for (var b = 0; b < blocks.length; b += 1) {
+    if (blockName(blocks[b]) === entryName) {
+      targetIdx = b;
+      break;
+    }
+  }
+  if (targetIdx < 0) return src;
+  var target = blocks[targetIdx];
+  var rest = blocks.filter(function(_, idx) { return idx !== targetIdx; });
+  var headerText = header.join('\n').replace(
+    /module\s+([A-Za-z][A-Za-z0-9_]*)\s+exposing\s*\([^)]*\)/,
+    function(_m, modName) {
+      var exposeNames = [entryName];
+      for (var r = 0; r < rest.length; r += 1) {
+        var n = blockName(rest[r]);
+        if (n && exposeNames.indexOf(n) < 0) exposeNames.push(n);
+      }
+      return 'module ' + modName + ' exposing (' + exposeNames.join(', ') + ')';
+    }
+  );
+  return [headerText.trim(), target.trim()].concat(rest.map(function(b) { return b.trim(); })).filter(Boolean).join('\n\n');
+};
+var compileBindingEntry = function(src, entryName) {
+  var reordered = reorderBindingFirstInSource(src, entryName);
+  return compileBindings(reordered);
+};
+var compileBindingEntryJS = function(src, entryName) {
+  var v = compileBindingEntry(src, entryName);
   if (v instanceof Right) {
     return {
       ok: true,
@@ -38833,77 +38903,78 @@ var compileBindingsJS = function(src) {
   if (v instanceof Left) {
     return { ok: false, output: "", error: v.value0 };
   }
-  throw new Error("compileBindingsJS: unexpected result");
+  throw new Error("compileBindingEntryJS: unexpected result");
+};
+var compileBindingsJS = function(src) {
+  var names = nullaryUserBindingNames(src);
+  if (names.length === 0) {
+    var v0 = compileBindings(src);
+    if (v0 instanceof Right) {
+      return {
+        ok: true,
+        output: stringifyWithIndent(2)(encodeProgramVM(v0.value0)),
+        error: ""
+      };
+    }
+    if (v0 instanceof Left) {
+      return { ok: false, output: "", error: v0.value0 };
+    }
+    throw new Error("compileBindingsJS: unexpected result");
+  }
+  return compileBindingEntryJS(src, names[0]);
+};
+var nullaryBindingsJS = function(src) {
+  return nullaryUserBindingNames(src);
 };
 var evalBindingsJsonJS = function(src, names) {
+  var userNames = nullaryUserBindingNames(src);
+  var userNameSet = {};
+  for (var u = 0; u < userNames.length; u += 1) userNameSet[userNames[u]] = true;
   var sigMap = {};
   signaturesJS(src).forEach(function(s) {
-    sigMap[s.name] = s.signature;
+    if (userNameSet[s.name]) sigMap[s.name] = s.signature;
   });
   var filterNames = names && names.length ? names : null;
-  var nullary = function(mod5) {
-    return mapMaybe(function(v2) {
-      var $93 = $$null(v2.params);
-      if ($93) {
-        return new Just(v2.name);
-      }
-      return Nothing.value;
-    })(moduleDecls(mod5));
-  };
-  var evalBindingJson = function(prog) {
-    return function(name2) {
-      var $94 = member(name2)(prog.functions);
-      if ($94) {
-        return new Just(function() {
-          var v2 = runProgram({
-            version: prog.version,
-            constants: prog.constants,
-            functions: prog.functions,
-            stateMachines: prog.stateMachines,
-            exports: prog.exports,
-            metadata: prog.metadata,
-            typeTable: prog.typeTable,
-            capabilities: prog.capabilities,
-            verification: prog.verification,
-            limits: prog.limits,
-            entrypoint: name2
-          });
-          if (v2 instanceof Right) {
-            return {
-              name: name2,
-              ok: true,
-              json: encodeValueJson(v2.value0),
-              typeSig: sigMap[name2] || "",
-              error: ""
-            };
-          }
-          if (v2 instanceof Left) {
-            return {
-              name: name2,
-              ok: false,
-              json: null,
-              typeSig: sigMap[name2] || "",
-              error: v2.value0
-            };
-          }
-          throw new Error("evalBindingsJsonJS: unexpected runProgram result");
-        }());
-      }
-      return Nothing.value;
-    };
-  };
-  var v = compileBindings(src);
-  var v1 = parseVerdict(src);
-  if (v1 instanceof Right && v instanceof Right) {
-    var results = mapMaybe(evalBindingJson(v.value0))(nullary(v1.value0));
-    if (filterNames) {
-      return results.filter(function(r) {
-        return filterNames.indexOf(r.name) >= 0;
-      });
+  var targetNames = filterNames || nullaryUserBindingNames(src);
+  var results = [];
+  for (var i = 0; i < targetNames.length; i += 1) {
+    var name2 = targetNames[i];
+    if (filterNames && filterNames.indexOf(name2) < 0) {
+      continue;
     }
-    return results;
+    var c = compileBindingEntry(src, name2);
+    if (c instanceof Left) {
+      results.push({
+        name: name2,
+        ok: false,
+        json: null,
+        typeSig: sigMap[name2] || "",
+        error: c.value0
+      });
+      continue;
+    }
+    var v2 = runProgram(c.value0);
+    if (v2 instanceof Right) {
+      results.push({
+        name: name2,
+        ok: true,
+        json: encodeValueJson(v2.value0),
+        typeSig: sigMap[name2] || "",
+        error: ""
+      });
+    } else if (v2 instanceof Left) {
+      results.push({
+        name: name2,
+        ok: false,
+        json: null,
+        typeSig: sigMap[name2] || "",
+        error: v2.value0
+      });
+    } else {
+      throw new Error("evalBindingsJsonJS: unexpected runProgram result");
+    }
   }
-  return [];
+  return results;
 };
 
 export {
@@ -38916,6 +38987,8 @@ export {
   diagnosticsJS,
   evalBindingsJS,
   compileBindingsJS,
+  compileBindingEntryJS,
+  nullaryBindingsJS,
   evalBindingsJsonJS,
   runJS,
   runProjectJS,

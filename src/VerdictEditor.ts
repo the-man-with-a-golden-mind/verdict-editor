@@ -23,10 +23,13 @@ import {
 import { installArrowOverlay } from './editor/vizArrows';
 import {
   createNotebookBridge,
+  loadNotebookDisplayRenderer,
   loadNotebookLib,
   loadVnbFromStorage,
   saveVnbToStorage,
+  type GlobalOutputSection,
   type NotebookApi,
+  type NotebookBridge,
 } from './editor/notebookBridge';
 import {
   evalNotebookCells,
@@ -390,6 +393,12 @@ class VerdictEditorElement extends HTMLElement {
   private bytecodeEditor: monaco.editor.IStandaloneCodeEditor | null = null;
   private container!: HTMLDivElement;
   private outputPanel!: HTMLDivElement;
+  private notebookGlobalOutputHost!: HTMLDivElement;
+  private programOutputHost!: HTMLDivElement;
+  private notebookBridgeRef: NotebookBridge | null = null;
+  private renderNotebookDisplay:
+    | ((host: HTMLElement, raw: unknown, bridge: NotebookBridge) => Promise<void>)
+    | null = null;
   private inputsPanel: HTMLDivElement | null = null;
   private dbPanel: HTMLDivElement | null = null;
   private debugPanel: HTMLDivElement | null = null;
@@ -687,8 +696,23 @@ class VerdictEditorElement extends HTMLElement {
     tabBar.appendChild(inputsTabBtn);
 
     this.outputPanel = document.createElement('div');
-    this.outputPanel.className = 'flex-1 min-h-0 overflow-auto p-4 font-mono text-sm leading-relaxed bg-[#0b0f1a] text-emerald-300';
-    this.outputPanel.innerHTML = '<div class="text-slate-600 italic">Press Run to compile and execute → results appear here.</div>';
+    this.outputPanel.className = 'flex flex-1 min-h-0 flex-col overflow-auto bg-[#0b0f1a]';
+
+    this.notebookGlobalOutputHost = document.createElement('div');
+    this.notebookGlobalOutputHost.dataset.notebookGlobalOutput = '1';
+    this.notebookGlobalOutputHost.className = 'notebook-global-output-side shrink-0 p-4';
+    this.notebookGlobalOutputHost.innerHTML =
+      '<div class="text-xs italic text-slate-600">Cell results routed here when a chunk uses global output (⇱).</div>';
+
+    this.programOutputHost = document.createElement('div');
+    this.programOutputHost.dataset.programOutput = '1';
+    this.programOutputHost.className =
+      'shrink-0 border-t border-slate-800/80 p-4 font-mono text-sm leading-relaxed text-emerald-300';
+    this.programOutputHost.innerHTML =
+      '<div class="text-slate-600 italic">Press Run to compile and execute the whole program.</div>';
+
+    this.outputPanel.appendChild(this.notebookGlobalOutputHost);
+    this.outputPanel.appendChild(this.programOutputHost);
 
     this.inputsPanel = document.createElement('div');
     this.inputsPanel.className = 'hidden flex-1 min-h-0 overflow-auto bg-[#0b0f1a] p-3';
@@ -1215,10 +1239,12 @@ class VerdictEditorElement extends HTMLElement {
     if (this.isDebugView() || !this.notebookHost) return;
     try {
       await loadAstLib();
+      this.renderNotebookDisplay = await loadNotebookDisplayRenderer();
       const bridge = createNotebookBridge({
         vlib,
         materialize: (source) => this.materializeInputs(source),
         onProgramChanged: (source) => this.onNotebookProgramChanged(source),
+        syncGlobalOutput: (sections) => this.syncNotebookGlobalOutput(sections),
         evalCells: (source, names) => {
           if (!vlib || !finvmLib) return [];
           return evalNotebookCells(
@@ -1275,6 +1301,7 @@ class VerdictEditorElement extends HTMLElement {
             astLib,
           ),
       });
+      this.notebookBridgeRef = bridge;
       const lib = await loadNotebookLib();
       this.notebookApi = lib.mountNotebook(
         '#verdict-notebook-host',
@@ -1288,6 +1315,49 @@ class VerdictEditorElement extends HTMLElement {
       this.container.classList.remove('hidden');
       if (this.notebookHost) this.notebookHost.classList.add('hidden');
     }
+  }
+
+  private async syncNotebookGlobalOutput(sections: GlobalOutputSection[]) {
+    if (!this.notebookGlobalOutputHost) return;
+    const renderDisplay = this.renderNotebookDisplay;
+    const bridge = this.notebookBridgeRef;
+    this.notebookGlobalOutputHost.innerHTML = '';
+    if (sections.length === 0) {
+      this.notebookGlobalOutputHost.innerHTML =
+        '<div class="text-xs italic text-slate-600">Cell results routed here when a chunk uses global output (⇱).</div>';
+      return;
+    }
+    for (const sec of sections) {
+      const section = document.createElement('div');
+      section.className = 'notebook-global-section mb-3 rounded border border-slate-800/80 bg-slate-900/40 p-2';
+      section.dataset.globalCellOutput = sec.cellId;
+      const head = document.createElement('div');
+      head.className = 'mb-2 text-[10px] font-bold uppercase tracking-wide text-slate-500';
+      head.textContent = `Cell ${sec.cellIndex + 1}`;
+      section.appendChild(head);
+      const content = document.createElement('div');
+      section.appendChild(content);
+      for (const o of sec.outputs) {
+        const block = document.createElement('div');
+        block.className = 'mb-2';
+        content.appendChild(block);
+        if (!o.ok) {
+          block.innerHTML = `<div class="text-xs text-rose-400">${escapeHtml(o.error ?? 'Error')}</div>`;
+        } else if (renderDisplay && bridge) {
+          await renderDisplay(block, o.display ?? o.json, bridge);
+        } else {
+          block.innerHTML = `<pre class="whitespace-pre-wrap break-words text-xs text-slate-300">${escapeHtml(JSON.stringify(o.display ?? o.json, null, 2))}</pre>`;
+        }
+      }
+      if (sec.error) {
+        const err = document.createElement('div');
+        err.className = 'text-xs text-rose-400';
+        err.textContent = sec.error;
+        content.appendChild(err);
+      }
+      this.notebookGlobalOutputHost.appendChild(section);
+    }
+    this.setActiveSideTab('output');
   }
 
   private setActiveSideTab(tab: 'output' | 'inputs') {
@@ -1656,7 +1726,8 @@ class VerdictEditorElement extends HTMLElement {
   private renderOutput(text: string, tone: 'ok' | 'error' | 'info') {
     const color =
       tone === 'ok' ? 'text-emerald-300' : tone === 'error' ? 'text-rose-200' : 'text-indigo-300';
-    this.outputPanel.innerHTML = `<div class="${color} font-mono text-sm whitespace-pre-wrap break-words">${escapeHtml(text)}</div>`;
+    this.programOutputHost.innerHTML = `<div class="${color} font-mono text-sm whitespace-pre-wrap break-words">${escapeHtml(text)}</div>`;
+    this.setActiveSideTab('output');
   }
 
   private installResizeHandle(handle: HTMLDivElement) {

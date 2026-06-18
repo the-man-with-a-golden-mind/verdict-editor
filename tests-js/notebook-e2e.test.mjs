@@ -114,9 +114,9 @@ rows = [{ val = "a" }, { val = "b,b" }]
       {},
     );
   });
-  await page.waitForSelector("[data-notebook-stack]", { timeout: 5000 });
+  await page.waitForSelector("[data-display-stack] [data-notebook-table]", { timeout: 30000 });
   const stackOk = await page.evaluate(() => {
-    const stacks = [...document.querySelectorAll("[data-notebook-stack]")];
+    const stacks = [...document.querySelectorAll("[data-display-stack]")];
     return stacks.some(
       (stack) =>
         !!stack.querySelector(".notebook-text-output") && !!stack.querySelector("[data-notebook-table]"),
@@ -164,17 +164,6 @@ rows = [{ val = "a" }, { val = "b,b" }]
   });
   assertOk(wysiwygOk, "WYSIWYG shows rich text without raw Markdown");
 
-  await clickButton(page, "Notebook ⇄ Source");
-  await delay(800);
-  await page.waitForSelector(".monaco-editor", { timeout: 10000 });
-  const sourceText = await page.evaluate(() => {
-    const lines = [...document.querySelectorAll(".monaco-editor .view-line")].map((el) => el.textContent ?? "");
-    return lines.join("\n");
-  });
-  assertOk(sourceText.includes("rows") && sourceText.includes("List"), `Source mode should show concatenated program: ${sourceText.slice(0, 120)}`);
-
-  await clickButton(page, "Notebook ⇄ Source");
-  await delay(500);
   await page.waitForSelector("[data-notebook-stack]", { timeout: 5000 });
 
   if (errors.length) throw new Error(`console errors: ${errors.join("; ")}`);

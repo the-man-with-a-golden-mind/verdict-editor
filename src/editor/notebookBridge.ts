@@ -15,6 +15,13 @@ export type NotebookCellInfo = {
   source: string;
 };
 
+export type GlobalOutputSection = {
+  cellIndex: number;
+  cellId: string;
+  outputs: CellOutput[];
+  error?: string;
+};
+
 export type NotebookBridge = {
   compile: (source: string) => { ok: boolean; error?: string };
   evalCells: (source: string, names: string[]) => CellOutput[] | Promise<CellOutput[]>;
@@ -22,6 +29,8 @@ export type NotebookBridge = {
   materialize: (source: string) => string;
   monaco: typeof monaco;
   loadPlotly: () => Promise<unknown>;
+  /** Render notebook cell outputs routed to the right-side Output panel. */
+  syncGlobalOutput: (sections: GlobalOutputSection[]) => void | Promise<void>;
   /** Toggle shell Monaco source view (true = show shell editor, hide notebook stack). */
   setSourceMode: (on: boolean) => void;
   isSourceMode: () => boolean;
@@ -59,11 +68,23 @@ type VerdictLib = {
   signaturesJS: (src: string) => Array<{ name: string; signature: string }>;
 };
 
+export async function loadNotebookDisplayRenderer(): Promise<
+  (host: HTMLElement, raw: unknown, bridge: NotebookBridge) => Promise<void>
+> {
+  const m = await importPublicModule('/lib/notebook.mjs');
+  const fn = (m as { renderDisplayInto?: unknown }).renderDisplayInto;
+  if (typeof fn !== 'function') {
+    throw new Error('notebook.mjs missing renderDisplayInto');
+  }
+  return fn as (host: HTMLElement, raw: unknown, bridge: NotebookBridge) => Promise<void>;
+}
+
 export function createNotebookBridge(deps: {
   vlib: VerdictLib | null;
   materialize: (source: string) => string;
   onProgramChanged: (source: string) => void;
   evalCells: (source: string, names: string[]) => CellOutput[] | Promise<CellOutput[]>;
+  syncGlobalOutput: NotebookBridge['syncGlobalOutput'];
   setSourceMode: (on: boolean) => void;
   isSourceMode: () => boolean;
   cellDiagnostics: NotebookBridge['cellDiagnostics'];
@@ -90,6 +111,7 @@ export function createNotebookBridge(deps: {
     },
 
     evalCells: deps.evalCells,
+    syncGlobalOutput: deps.syncGlobalOutput,
 
     onProgramChanged: deps.onProgramChanged,
     materialize: deps.materialize,

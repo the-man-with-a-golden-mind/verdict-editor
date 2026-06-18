@@ -1,6 +1,8 @@
 module Notebook
   ( concatenateCode
   , bindingNamesInCell
+  , NotebookModel
+  , emptyNotebook
   ) where
 
 import Prelude
@@ -9,6 +11,14 @@ import Cell (Cell, CellKind(..))
 import Data.Array (filter, null, uncons)
 import Data.Maybe (Maybe(..))
 import Data.String (trim)
+
+type NotebookModel =
+  { cells :: Array Cell
+  , focusedId :: Maybe String
+  }
+
+emptyNotebook :: NotebookModel
+emptyNotebook = { cells: [], focusedId: Nothing }
 
 concatenateCode :: Array Cell -> String
 concatenateCode cells =

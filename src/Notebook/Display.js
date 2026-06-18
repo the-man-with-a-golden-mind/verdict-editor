@@ -72,7 +72,7 @@ export async function renderDisplayInto(host, raw, bridge) {
   if (d.kind === "stack") {
     const stackEl = document.createElement("div");
     stackEl.className = "flex flex-col gap-3 notebook-stack";
-    stackEl.dataset.notebookStack = "1";
+    stackEl.dataset.displayStack = "1";
     for (const item of d.items ?? []) {
       const child = document.createElement("div");
       stackEl.appendChild(child);

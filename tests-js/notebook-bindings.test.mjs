@@ -4,29 +4,21 @@ import { pathToFileURL } from "url";
 import path from "path";
 import { fileURLToPath } from "url";
 import { buildCellLineMap } from "./notebook-helpers.mjs";
+import {
+  bindingNamesFromSourceScan,
+  bindingNamesInCellCore,
+  filterRunnableBindingNames,
+  mapBindingsFromAstCore,
+} from "../src/editor/notebookBindingsCore.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function mapBindingsFromAst(astLib, materializedSource, cells) {
-  if (!astLib?.astJS) return null;
-  const res = astLib.astJS(materializedSource);
-  if (!res.ok || !res.ast) return null;
-  const mod = JSON.parse(res.ast);
-  const codeCells = cells.filter((c) => c.kind === "code");
-  const lineMap = buildCellLineMap(codeCells);
-  const out = new Map();
-  for (const cell of codeCells) out.set(cell.id, []);
-  for (const decl of mod.decls ?? []) {
-    const line = decl.body?.pos?.line;
-    if (!decl.name || !line || (decl.params?.length ?? 0) > 0) continue;
-    for (const cell of codeCells) {
-      const span = lineMap.get(cell.id);
-      if (!span || line < span.startLine || line > span.endLine) continue;
-      out.get(cell.id).push(decl.name);
-      break;
-    }
-  }
-  return out;
+  return mapBindingsFromAstCore(astLib, materializedSource, cells, buildCellLineMap(cells));
+}
+
+function bindingNamesInCell(cellId, cells, materializedSource, astLib) {
+  return bindingNamesInCellCore(cellId, cells, materializedSource, astLib, buildCellLineMap);
 }
 
 test("bindings: astJS maps nullary decls to cells by line", async () => {
@@ -58,6 +50,47 @@ test("bindings: map skips decls with parameters", () => {
   const map = mapBindingsFromAst(astLib, cells[0].source, cells);
   assert.ok(map);
   assert.deepEqual(map.get("c1"), ["x"]);
+});
+
+test("bindings: record literal lines are not treated as top-level bindings", () => {
+  const recordCell = `    mean = mean, stddev = sd, zscore = z, emaFast = emaFast, emaSlow = emaSlow,
+    slope = slope, rangePos = rangePos, momentum = mom, samples = length(window) }`;
+  assert.deepEqual(bindingNamesFromSourceScan(recordCell), []);
+});
+
+test("bindings: ast empty cell does not fall back to record-field scan", async () => {
+  const astLib = await import(pathToFileURL(path.join(root, "public/lib/verdict-ast.mjs")).href);
+  const cells = [
+    { id: "c1", kind: "code", source: "module Main exposing (main)\n\nmain : String\nmain = \"ok\"" },
+    {
+      id: "c2",
+      kind: "code",
+      source: `    mean = mean, stddev = sd,
+    slope = slope, samples = length(window) }`,
+    },
+  ];
+  const full = cells.map((c) => c.source.trim()).join("\n\n");
+  assert.deepEqual(bindingNamesInCell("c2", cells, full, astLib), []);
+});
+
+test("bindings: compileBindingEntryJS runs each nullary binding", async () => {
+  const v = await import(pathToFileURL(path.join(root, "public/lib/verdict-notebook.mjs")).href);
+  const src = "module Main exposing (x, y)\n\nx : Int\nx = 1\n\ny : Int\ny = 2\n";
+  const out = v.evalBindingsJsonJS(src, ["x", "y"]);
+  assert.equal(out.length, 2);
+  assert.equal(out[0]?.name, "x");
+  assert.equal(out[0]?.ok, true);
+  assert.equal(out[1]?.name, "y");
+  assert.equal(out[1]?.ok, true);
+  assert.equal(out[1]?.json?.int, "2");
+});
+
+test("bindings: filterRunnableBindingNames drops ghost names", async () => {
+  const v = await import(pathToFileURL(path.join(root, "public/lib/verdict-notebook.mjs")).href);
+  const src = "module Main exposing (x)\n\nx : Int\nx = 1\n";
+  const compiled = v.compileBindingsJS(src);
+  assert.equal(compiled.ok, true);
+  assert.deepEqual(filterRunnableBindingNames(compiled.output, ["x", "mean", "slope"]), ["x"]);
 });
 
 test("verdict-notebook: evalBindingsJsonJS returns structured json", async () => {

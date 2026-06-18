@@ -100,6 +100,41 @@ bad = not_a_binding
   assert.ok(out[0]?.error);
 });
 
+test("FinVM: record-fragment cell names do not produce binding not runnable errors", async () => {
+  const { evalNotebookCells, createEffectStorage, vlib, finvm } = await loadLibs();
+  const { ctx } = makeCtx(vlib, finvm, createEffectStorage);
+  const src = `module Main exposing (main)
+
+main : String
+main = "ok"
+`;
+  const out = await evalNotebookCells(ctx, src, ["mean", "slope", "main"]);
+  const byName = Object.fromEntries(out.map((o) => [o.name, o]));
+  assert.equal(byName.main?.ok, true);
+  assert.equal(byName.mean, undefined);
+  assert.equal(byName.slope, undefined);
+});
+
+test("FinVM: multi-binding module runs each cell binding", async () => {
+  const { evalNotebookCells, createEffectStorage, vlib, finvm } = await loadLibs();
+  const { ctx } = makeCtx(vlib, finvm, createEffectStorage);
+  const src = `module Main exposing (x, y)
+
+x : Int
+x = 1
+
+y : Int
+y = 2
+`;
+  const out = await evalNotebookCells(ctx, src, ["x", "y"]);
+  assert.equal(out.length, 2);
+  assert.equal(out[0]?.name, "x");
+  assert.equal(out[0]?.ok, true);
+  assert.equal(out[1]?.name, "y");
+  assert.equal(out[1]?.ok, true);
+  assert.match(String(out[1]?.display?.text ?? out[1]?.json), /2/);
+});
+
 test("FinVM: prefix eval re-runs prior binding before later cell", async () => {
   const { evalNotebookCells, createEffectStorage, vlib, finvm } = await loadLibs();
   const { ctx, getStorage } = makeCtx(vlib, finvm, createEffectStorage);
@@ -111,8 +146,10 @@ seed = dbInsert("items", { val = "hello" })
   await evalNotebookCells(ctx, cell1, ["seed"]);
   const full = cell1 + `\n\ncount : Int\ncount = 1\n`;
   const out = await evalNotebookCells(ctx, full, ["seed", "count"]);
+  assert.equal(out.length, 2);
   assert.equal(out[0]?.name, "seed");
   assert.equal(out[0]?.ok, true);
   assert.ok(getStorage().listDbTables().items.length >= 2);
   assert.equal(out[1]?.name, "count");
+  assert.equal(out[1]?.ok, true);
 });

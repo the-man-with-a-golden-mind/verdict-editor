@@ -12,7 +12,9 @@
             "integers",
             "maybe",
             "prelude",
-            "strings"
+            "ps-spa",
+            "strings",
+            "tuples"
           ]
         },
         "test": {
@@ -523,7 +525,11 @@
         "zipperarray": "2.0.0"
       }
     },
-    "extra_packages": {}
+    "extra_packages": {
+      "ps-spa": {
+        "path": "../../node_modules/ps-spa"
+      }
+    }
   },
   "packages": {
     "arrays": {
@@ -873,6 +879,22 @@
         "newtype",
         "prelude",
         "tuples"
+      ]
+    },
+    "ps-spa": {
+      "type": "local",
+      "path": "../../node_modules/ps-spa",
+      "dependencies": [
+        "arrays",
+        "effect",
+        "foldable-traversable",
+        "integers",
+        "maybe",
+        "prelude",
+        "refs",
+        "strings",
+        "tuples",
+        "type-equality"
       ]
     },
     "refs": {

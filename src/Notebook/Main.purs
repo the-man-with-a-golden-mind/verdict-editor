@@ -7,6 +7,7 @@ module Main
   , decodeDisplayKindExport
   , spreadsheetCsvExport
   , renderDisplayIntoExport
+  , mountSpreadsheetViewExport
   ) where
 
 import Prelude
@@ -15,10 +16,10 @@ import Cell (Cell, CellKind(..))
 import Csv (escapeField, rowsToCsv)
 import Display as D
 import Notebook (concatenateCode, bindingNamesInCell)
-import Spreadsheet (rowsToCsvFromTable)
+import Spreadsheet as SS
 import Data.Maybe (Maybe(..))
 import Effect (Effect)
-import Effect.Uncurried (EffectFn1, EffectFn3, mkEffectFn1, mkEffectFn3)
+import Effect.Uncurried (EffectFn1, EffectFn2, EffectFn3, mkEffectFn1, mkEffectFn3)
 import Foreign (Foreign)
 
 foreign import mountNotebookImpl :: String -> Foreign -> String -> Effect Foreign
@@ -61,7 +62,10 @@ decodeDisplayKindExport = mkEffectFn1 \raw ->
 
 spreadsheetCsvExport :: EffectFn1 Foreign String
 spreadsheetCsvExport = mkEffectFn1 \raw ->
-  pure (rowsToCsvFromTable (tableHeaders raw) (tableBody raw))
+  pure (SS.rowsToCsvFromTable (tableHeaders raw) (tableBody raw))
+
+mountSpreadsheetViewExport :: EffectFn2 Foreign Foreign Unit
+mountSpreadsheetViewExport = SS.mountSpreadsheetViewExport
 
 renderDisplayIntoExport :: EffectFn3 Foreign Foreign Foreign Unit
 renderDisplayIntoExport = D.renderDisplayIntoExport

@@ -8,8 +8,13 @@ package:
     - integers
     - maybe
     - prelude
+    - ps-spa
     - strings
+    - tuples
 
 workspace:
   packageSet:
     registry: 55.0.0
+  extraPackages:
+    ps-spa:
+      path: ../../node_modules/ps-spa
