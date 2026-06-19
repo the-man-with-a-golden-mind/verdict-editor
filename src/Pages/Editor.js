@@ -1,9 +1,9 @@
-export const mountMonacoImpl = (id) => () => {
+export const mountVerdictEditorImpl = (id) => () => {
   setTimeout(async () => {
     const el = document.getElementById(id);
     if (el) {
-      if (!el.hasAttribute('data-monaco-mounted')) {
-        el.setAttribute('data-monaco-mounted', 'true');
+      if (!el.hasAttribute('data-verdict-editor-mounted')) {
+        el.setAttribute('data-verdict-editor-mounted', 'true');
         const { initVerdictEditor } = await import('../VerdictEditor');
         initVerdictEditor(el);
       }

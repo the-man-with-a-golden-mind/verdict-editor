@@ -1,8 +1,7 @@
 # Verdict Prop Editor — design doc (lightweight notebook cell editor)
 
-Status: proposed · Scope: replace **Monaco in notebook code cells** with a
-**fast, PureScript-first per-cell editor** (“Prop Editor”), while **keeping
-Monaco for Source mode** and other shell surfaces that need full IDE features.
+Status: **implemented — Monaco fully replaced by CodeMirror 6** · Scope: **one Verdict editor engine**
+(`src/editor/verdictCm/`) for notebook cells **and** shell Source mode.
 
 Related: [notebook-redesign-plan.md](./notebook-redesign-plan.md) (architecture),
 [visualization-tab-design.md](./visualization-tab-design.md) (doc style).
@@ -32,14 +31,13 @@ enough to swap on focus) without full notebook re-render.
 
 ## 2. Locked decisions
 
-- **Split editors by mode**
-  - **Notebook code cells** → Prop Editor (new, light).
-  - **Source mode** (whole program in shell) → **keep Monaco** unchanged for now.
-  - **Bytecode / Debug read-only panels** → keep Monaco (or existing static highlighter).
+- **One editor engine everywhere** — CodeMirror 6 (`verdictCm/`) for notebook cells,
+  Source mode, and bytecode panel. **No Monaco dependency.**
 - **PureScript-first**: ps-spa owns cell model, focus, diagnostics display, and
   render strategy; JS is FFI-thin (CodeMirror 6 or equivalent).
 - **No feature parity with Monaco in v1** — ship fast editing + syntax + cell
-  diagnostics first; add completions/hover in v2 if needed.
+  diagnostics first; **v2 adds fake-LSP in Prop Editor** (lint squiggles, hover,
+  completion, inline binding results via `signaturesJS` / `evalBindingsJS`).
 - **Incremental DOM** is mandatory — Prop Editor does not fix slowness if we still
   nuke the stack on every click.
 
@@ -109,10 +107,10 @@ Verdict grammar (or legacy mode ported from Monarch rules in `VerdictEditor.ts`)
 | Feature | Used for | Prop Editor v1 |
 | --- | --- | --- |
 | Verdict Monarch tokenizer | Syntax colors | **Port** same rules to CM6 Lezer or legacy mode |
-| Completion (keywords, types, prelude fns) | Tab completion | **Defer** — optional v2 |
-| Hover (`signaturesJS`) | `name : Type` | **Defer** — optional v2 (cheap: query on Ctrl+hover) |
-| Error squiggles (`setModelMarkers`) | Whole-program diagnostics | **Cell-scoped** text under editor (already in notebook) |
-| Inline binding results (ghost text) | Source mode only | **N/A** in cells |
+| Completion (keywords, types, prelude fns) | Tab completion | **Ported** — static list in `verdictPrelude.js` |
+| Hover (`signaturesJS`) | `name : Type` + `--` doc | **Ported** — CM6 hover in cells |
+| Error squiggles (`setModelMarkers`) | Whole-program diagnostics | **Ported** — `@codemirror/lint` per cell |
+| Inline binding results (ghost text) | Source mode only | **Ported** — cell bindings only |
 | Bracket matching, find, minimap | Power editing | **Defer** / partial (CM6 bracket extension) |
 | `Ctrl+Enter` run | Shell shortcut | **Keep in shell**; cell run via gutter / ps-spa keymap |
 
@@ -209,16 +207,18 @@ once per `(cellId, bindingName, outputHash)`; update in place when eval result c
 - [ ] Remove `destroyCellMonaco` / `monaco.colorize` from notebook bundle
 - [ ] Debounced diagnostics module
 
-### Phase 3 — Polish + remove notebook Monaco
+### Phase 3 — Remove notebook Monaco (**done**)
 
-- [ ] Delete `MonacoFFI.purs` from notebook spago bundle
-- [ ] Update [notebook-redesign-plan.md](./notebook-redesign-plan.md) diagram (CodeCell → Prop Editor)
-- [ ] Keyboard shortcuts, auto-height, folded preview
+- [x] Delete `MonacoFFI.purs` / `MonacoFFI.js` from notebook bundle
+- [x] No feature flag — Prop Editor is the only cell editor
+- [x] Incremental DOM for focus, fold, add/delete
 
-### Phase 4 (optional) — Completions / hover in cells
+### Phase 4 — Fake LSP in cells (**implemented**)
 
-- [ ] Static completion source
-- [ ] Hover via `signaturesJS` on demand
+- [x] Static completion source (`VerdictSyntax.js` prelude lists)
+- [x] Hover via `bridge.signatures` + `--` doc comments (`VerdictLanguageService.js`)
+- [x] Lint squiggles from debounced `cellDiagnostics`
+- [x] Inline `evalBindings` ghost text for bindings in the focused cell
 
 **Host shell:** Monaco remains for Source mode until a separate “whole-file Prop
 Editor” project justifies migration.
@@ -287,9 +287,15 @@ Record before/after in PR description using Chrome Performance panel or
 **Explicitly out of scope for v1:**
 
 - Replacing Monaco in Source mode
-- Cell-level completions/hover (v2)
 - Collaborative editing / CRDT
-- LSP-level features
+- Real LSP / language-server protocol
+
+**Now in Prop Editor (Phase 4 — fake LSP, same compiler hooks as Monaco):**
+
+- Error squiggles + gutter markers (`@codemirror/lint` + debounced `cellDiagnostics`)
+- Hover types via `signaturesJS` + `--` doc comments above bindings
+- Tab completion (keywords, types, prelude functions)
+- Inline binding results via `evalBindingsJS` (bindings defined in that cell only)
 
 ---
 

@@ -12,6 +12,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const srcPath = path.join(root, "public/lib/verdict.mjs");
 const actorPath = path.join(root, "lib/verdict/Actor.verdict");
 const idePath = path.join(root, "lib/verdict/IDE.verdict");
+const cellBusPath = path.join(root, "lib/verdict/CellBus.verdict");
+const displayPath = path.join(root, "lib/verdict/Display.verdict");
 const outPath = path.join(root, "public/lib/verdict-notebook.mjs");
 
 let code = fs.readFileSync(srcPath, "utf8");
@@ -25,8 +27,12 @@ if (patchStart >= 0 && exportStart > patchStart) {
 
 const actorSource = fs.readFileSync(actorPath, "utf8").trim();
 const ideSource = fs.readFileSync(idePath, "utf8").trim();
+const cellBusSource = fs.readFileSync(cellBusPath, "utf8").trim();
+const displaySource = fs.readFileSync(displayPath, "utf8").trim();
 const actorLibraryLiteral = JSON.stringify("\n" + actorSource + "\n");
 const ideLibraryLiteral = JSON.stringify("\n" + ideSource + "\n");
+const cellBusLibraryLiteral = JSON.stringify("\n" + cellBusSource + "\n");
+const displayLibraryLiteral = JSON.stringify("\n" + displaySource + "\n");
 
 const libraryLinkHelpers = [
   "var usesActorLibrary = function(src) {",
@@ -35,25 +41,72 @@ const libraryLinkHelpers = [
   "var usesIdeLibrary = function(src) {",
   "  return /\\b(ensureGlobal|bootGlobal|registerWorker|ask\\b|idePut|ideGet)\\b/.test(src);",
   "};",
-  "var linkLibrary = function(source, base) {",
-  "  var vLib = parseVerdict(source);",
-  "  if (vLib instanceof Left) {",
-  '    throw new Error("internal error: library failed to parse");',
-  "  }",
-  "  if (vLib instanceof Right) {",
-  "    return linkAll(vLib.value0)(base);",
-  "  }",
-  '  throw new Error("internal error: library parse unexpected");',
+  "var usesCellBusLibrary = function(src) {",
+  "  return /\\b(busPost|busRead|busQueue|busPending|busTakeFirst)\\b/.test(src);",
   "};",
+  "var usesDisplayLibrary = function(src) {",
+  "  return /\\b(dText|dTrace|dLine|dArea|dStep|dMarkers|dChart|dChartY|dChartY2|dStack|dRow|dCol|dTable)\\b/.test(src);",
+  "};",
+  "var parseLibraryModule = function(source) {",
+  "  var v = parseVerdict(source);",
+  "  if (v instanceof Right) { return v.value0; }",
+  '  throw new Error("internal error: library failed to parse");',
+  "};",
+  "var addLibraryDecls = function(used, source, types, decls) {",
+  "  if (!used) { return; }",
+  "  var m = parseLibraryModule(source);",
+  "  var ts = moduleTypes(m); var ds = moduleDecls(m);",
+  "  for (var i = 0; i < ts.length; i++) { types.push(ts[i]); }",
+  "  for (var j = 0; j < ds.length; j++) { decls.push(ds[j]); }",
+  "};",
+  "// Merge every used library's decls INTO the user module, then link once",
+  "// against the full prelude. Reachability is then computed from the user's own",
+  "// code, so prelude functions the user calls (e.g. strConcat) survive even when",
+  "// a linked library does not reference them. Chaining per-library links would",
+  "// instead prune the prelude down to each library's needs.",
   "var linkBindingsModule = function(src, userMod, preludeMod) {",
-  "  var base = preludeMod;",
-  "  if (usesActorLibrary(src)) {",
-  "    base = linkLibrary(actorLibrarySource, base);",
+  "  var types = []; var decls = [];",
+  "  addLibraryDecls(usesActorLibrary(src), actorLibrarySource, types, decls);",
+  "  addLibraryDecls(usesIdeLibrary(src), ideLibrarySource, types, decls);",
+  "  addLibraryDecls(usesCellBusLibrary(src), cellBusLibrarySource, types, decls);",
+  "  addLibraryDecls(usesDisplayLibrary(src), displayLibrarySource, types, decls);",
+  "  var mergedTypes = moduleTypes(userMod).concat(types);",
+  "  var mergedDecls = moduleDecls(userMod).concat(decls);",
+  "  var mergedUser = new Module(moduleName(userMod), mergedTypes, mergedDecls);",
+  "  return linkAll(mergedUser)(preludeMod);",
+  "};",
+  // Render the compiler's internal type format as readable Verdict surface
+  // syntax for hover / autocomplete: {[(Tuple "k" T)]} -> { k : T } and ? -> Json.
+  "var splitTopLevelCommas = function(s) {",
+  "  var parts = []; var depth = 0; var cur = '';",
+  "  for (var i = 0; i < s.length; i++) {",
+  "    var c = s[i];",
+  "    if (c === '(' || c === '{' || c === '[') depth++;",
+  "    else if (c === ')' || c === '}' || c === ']') depth--;",
+  "    if (c === ',' && depth === 0) { parts.push(cur); cur = ''; } else cur += c;",
   "  }",
-  "  if (usesIdeLibrary(src)) {",
-  "    base = linkLibrary(ideLibrarySource, base);",
+  "  if (cur.length) parts.push(cur);",
+  "  return parts;",
+  "};",
+  "var prettyRecordInner = function(inner) {",
+  "  var parts = splitTopLevelCommas(inner);",
+  "  var out = [];",
+  "  for (var i = 0; i < parts.length; i++) {",
+  "    var p = parts[i].trim();",
+  "    var m = p.match(/^\\(Tuple\\s+\"([^\"]*)\"\\s+([\\s\\S]*)\\)$/);",
+  "    if (m) out.push(m[1] + ' : ' + m[2].trim()); else out.push(p);",
   "  }",
-  "  return linkAll(userMod)(base);",
+  "  return '{ ' + out.join(', ') + ' }';",
+  "};",
+  "var prettifyTypeSig = function(sig) {",
+  "  if (typeof sig !== 'string') return sig;",
+  "  var s = sig.replace(/\\?/g, 'Json');",
+  "  var guard = 0;",
+  "  while (s.indexOf('{[') >= 0 && guard < 60) {",
+  "    guard++;",
+  "    s = s.replace(/\\{\\[((?:(?!\\{\\[|\\]\\})[\\s\\S])*)\\]\\}/, function(_m, inner) { return prettyRecordInner(inner); });",
+  "  }",
+  "  return s;",
   "};",
   "",
 ].join("\n");
@@ -63,7 +116,7 @@ code = code.replace(/\nvar ideLibrarySource = "[^"]*";?\n/g, "\n");
 code = code.replace(/\nvar usesActorLibrary = function[\s\S]*?\n\};\nvar linkBindingsModule[\s\S]*?\n\};\n/g, "\n");
 code = code.replace(
   /var preludeSource = '/,
-  `var actorLibrarySource = ${actorLibraryLiteral};\nvar ideLibrarySource = ${ideLibraryLiteral};\n${libraryLinkHelpers}var preludeSource = '`,
+  `var actorLibrarySource = ${actorLibraryLiteral};\nvar ideLibrarySource = ${ideLibraryLiteral};\nvar cellBusLibrarySource = ${cellBusLibraryLiteral};\nvar displayLibrarySource = ${displayLibraryLiteral};\n${libraryLinkHelpers}var preludeSource = '`,
 );
 
 code = code.replace(
@@ -181,7 +234,13 @@ code = code.replace(
     "  if (usesIdeLibrary(src)) {",
     "    sigs = append9(sigs)(sigsOf(ideLibrarySource));",
     "  }",
-    "  return sigs;",
+    "  if (usesCellBusLibrary(src)) {",
+    "    sigs = append9(sigs)(sigsOf(cellBusLibrarySource));",
+    "  }",
+    "  if (usesDisplayLibrary(src)) {",
+    "    sigs = append9(sigs)(sigsOf(displayLibrarySource));",
+    "  }",
+    "  return sigs.map(function(s) { return { name: s.name, signature: prettifyTypeSig(s.signature) }; });",
     "};",
   ].join("\n"),
 );
@@ -218,18 +277,17 @@ const insert = [
   "  }",
   "  var body = lines.slice(i).join('\\n');",
   "  var blocks = body.split(/\\n\\s*\\n/).map(function(b) { return b.trim(); }).filter(Boolean);",
+  "  var bindingIdent = function(line) {",
+  "    var t = line.trim();",
+  "    if (!t || t.startsWith('--')) return '';",
+  "    var m = t.match(/^([A-Za-z_][A-Za-z0-9_']*)(?:\\s+[:(]|\\s+=|$)/);",
+  "    return m ? m[1] : '';",
+  "  };",
   "  var blockName = function(block) {",
   "    var rows = block.split('\\n');",
   "    for (var r = 0; r < rows.length; r += 1) {",
-  "      var t = rows[r].trim();",
-  "      if (!t || t.startsWith('--')) continue;",
-  "      var eq = t.indexOf(' =');",
-  "      if (eq > 0) return t.slice(0, eq).trim();",
-  "      var col = t.indexOf(' :');",
-  "      if (col > 0) return t.slice(0, col).trim();",
-  "      var sp = t.indexOf(' ');",
-  "      if (sp > 0) return t.slice(0, sp).trim();",
-  "      return t;",
+  "      var n = bindingIdent(rows[r]);",
+  "      if (n) return n;",
   "    }",
   "    return '';",
   "  };",
@@ -257,12 +315,7 @@ const insert = [
   "  var headerText = header.join('\\n').replace(",
   "    /module\\s+([A-Za-z][A-Za-z0-9_]*)\\s+exposing\\s*\\([^)]*\\)/,",
   "    function(_m, modName) {",
-  "      var exposeNames = [entryName];",
-  "      for (var r = 0; r < rest.length; r += 1) {",
-  "        var n = blockName(rest[r]);",
-  "        if (n && exposeNames.indexOf(n) < 0) exposeNames.push(n);",
-  "      }",
-  "      return 'module ' + modName + ' exposing (' + exposeNames.join(', ') + ')';",
+  "      return 'module ' + modName + ' exposing (..)';",
   "    }",
   "  );",
   "  return [headerText.trim(), target.trim()].concat(rest.map(function(b) { return b.trim(); })).filter(Boolean).join('\\n\\n');",

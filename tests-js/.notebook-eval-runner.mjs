@@ -105,6 +105,14 @@ function createEffectStorage() {
     dbGet(table, id) {
       return tbl(table).get(id) ?? null;
     },
+    dbQuery(table, filter) {
+      const rows = tbl(table);
+      const out = [];
+      for (const [, value] of rows) {
+        if (recordMatchesFilter(value, filter)) out.push(value);
+      }
+      return out;
+    },
     dbUpdate(table, id, record) {
       if (!tbl(table).has(id)) return false;
       tbl(table).set(id, record);
@@ -209,6 +217,29 @@ function valueToJs(v) {
   }
   return v;
 }
+function recordMatchesFilter(record, filter) {
+  if (!filter || Object.keys(filter).length === 0) {
+    return record != null && typeof record === "object";
+  }
+  if (!record || typeof record !== "object") return false;
+  const row = record;
+  for (const [key, expected] of Object.entries(filter)) {
+    if (!shallowEqualJsonField(row[key], expected)) return false;
+  }
+  return true;
+}
+function shallowEqualJsonField(a, b) {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  if (typeof a === "object" && typeof b === "object") {
+    try {
+      return JSON.stringify(a) === JSON.stringify(b);
+    } catch {
+      return false;
+    }
+  }
+  return String(a) === String(b);
+}
 function createFinvmHandlers(storage, fetchImpl = globalThis.fetch.bind(globalThis)) {
   return {
     "http.get": async (p) => {
@@ -236,6 +267,10 @@ function createFinvmHandlers(storage, fetchImpl = globalThis.fetch.bind(globalTh
     },
     "db.get": async (p) => {
       return storage.dbGet(String(p.table ?? ""), String(p.id ?? ""));
+    },
+    "db.query": async (p) => {
+      const filter = p.query ?? p.filter ?? {};
+      return storage.dbQuery(String(p.table ?? ""), filter);
     },
     "db.update": async (p) => {
       return storage.dbUpdate(String(p.table ?? ""), String(p.id ?? ""), p.record ?? {});
@@ -451,8 +486,8 @@ function vmValueToDisplay(value, typeSig) {
 }
 function buildCellLineMap(cells) {
   const map = /* @__PURE__ */ new Map();
-  let line = 1;
   const codeCells = cells.filter((c) => c.kind === "code");
+  let line = codeCells.length && !/^\s*module\b/.test(codeCells[0].source) ? 3 : 1;
   for (let i = 0; i < codeCells.length; i++) {
     const cell = codeCells[i];
     const startLine = line;

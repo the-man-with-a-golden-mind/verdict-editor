@@ -145,7 +145,7 @@ step2 = 0
   assert.ok(countLiveProcesses(snap2) >= 2);
 });
 
-test("Verdict.Actor: prefix eval main then noop keeps actor snapshot", async () => {
+test("Verdict.Actor: sequential cell runs keep actor snapshot without batch eval", async () => {
   const { evalNotebookCells, createEffectStorage, vlib, finvm, countLiveProcesses, FINVM_SNAPSHOT_KEY } =
     await loadLibs();
   const { ctx, getState } = makeCtx(vlib, finvm, createEffectStorage);
@@ -162,11 +162,13 @@ step2 : Int
 step2 = 0
 `;
 
-  const out = await evalNotebookCells(ctx, src, ["main", "step2"]);
-  assert.equal(out.length, 2);
-  assert.equal(out[0]?.ok, true);
-  assert.equal(out[1]?.ok, true);
-  assert.match(displayText(out[0]), /2/);
+  const out1 = await evalNotebookCells(ctx, src, ["main"]);
+  assert.equal(out1[0]?.ok, true);
+  assert.match(displayText(out1[0]), /2/);
+  assert.ok(countLiveProcesses(getState()[FINVM_SNAPSHOT_KEY]) >= 1);
+
+  const out2 = await evalNotebookCells(ctx, src, ["step2"]);
+  assert.equal(out2[0]?.ok, true);
   assert.ok(countLiveProcesses(getState()[FINVM_SNAPSHOT_KEY]) >= 1);
 });
 

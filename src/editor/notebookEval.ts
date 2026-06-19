@@ -143,8 +143,11 @@ export function vmValueToDisplay(value: unknown, typeSig: string): unknown {
 
 export function buildCellLineMap(cells: NotebookCellRef[]): Map<string, { startLine: number; endLine: number }> {
   const map = new Map<string, { startLine: number; endLine: number }>();
-  let line = 1;
   const codeCells = cells.filter((c) => c.kind === 'code');
+  // concatCode prepends `module Main exposing (..)\n\n` (2 lines) when the first
+  // code cell does not already start with a `module` header. Diagnostics run on
+  // that prepended source, so shift cell spans down to keep highlights aligned.
+  let line = codeCells.length && !/^\s*module\b/.test(codeCells[0].source) ? 3 : 1;
   for (let i = 0; i < codeCells.length; i++) {
     const cell = codeCells[i];
     const startLine = line;

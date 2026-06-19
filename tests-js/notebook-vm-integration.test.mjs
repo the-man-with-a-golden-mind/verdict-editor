@@ -135,7 +135,7 @@ y = 2
   assert.match(String(out[1]?.display?.text ?? out[1]?.json), /2/);
 });
 
-test("FinVM: prefix eval re-runs prior binding before later cell", async () => {
+test("FinVM: sequential cell runs share db state without prefix re-eval", async () => {
   const { evalNotebookCells, createEffectStorage, vlib, finvm } = await loadLibs();
   const { ctx, getStorage } = makeCtx(vlib, finvm, createEffectStorage);
   const cell1 = `module Main exposing (seed)
@@ -145,11 +145,9 @@ seed = dbInsert("items", { val = "hello" })
 `;
   await evalNotebookCells(ctx, cell1, ["seed"]);
   const full = cell1 + `\n\ncount : Int\ncount = 1\n`;
-  const out = await evalNotebookCells(ctx, full, ["seed", "count"]);
-  assert.equal(out.length, 2);
-  assert.equal(out[0]?.name, "seed");
+  const out = await evalNotebookCells(ctx, full, ["count"]);
+  assert.equal(out.length, 1);
+  assert.equal(out[0]?.name, "count");
   assert.equal(out[0]?.ok, true);
-  assert.ok(getStorage().listDbTables().items.length >= 2);
-  assert.equal(out[1]?.name, "count");
-  assert.equal(out[1]?.ok, true);
+  assert.ok(getStorage().listDbTables().items.length >= 1);
 });
