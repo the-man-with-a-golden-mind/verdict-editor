@@ -38,8 +38,8 @@ function renderTree(display) {
   if (display.kind === "text") return { type: "text", text: display.text };
   if (display.kind === "chart") return { type: "chart", traces: (display.traces ?? []).length };
   if (display.kind === "table") return { type: "table", rows: (display.rows ?? []).length };
-  if (display.kind === "stack") {
-    return { type: "stack", items: (display.items ?? []).map(renderTree) };
+  if (display.kind === "stack" || display.kind === "row" || display.kind === "col") {
+    return { type: display.kind, items: (display.items ?? []).map(renderTree) };
   }
   return { type: "unknown" };
 }

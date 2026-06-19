@@ -4,6 +4,11 @@
  * Market logic stays in Verdict source; this only fulfils VM effect intents.
  */
 
+import {
+  rebootMainInSnapshot,
+  registerCountForFunction,
+} from './finvmSnapshot';
+
 type FinVmTagless = Record<string, unknown>;
 
 export interface EffectStorage {
@@ -96,6 +101,15 @@ export function jsToValue(x: unknown): FinVmTagless | null {
     if ('tag' in obj && 'payload' in obj) {
       return { variant: { tag: obj.tag, payload: jsToValue(obj.payload) } };
     }
+    if (typeof obj.proc === 'string') {
+      return { proc: { string: obj.proc } };
+    }
+    if (obj.proc && typeof obj.proc === 'object' && 'string' in obj.proc) {
+      return obj as FinVmTagless;
+    }
+    if (typeof obj.process === 'string') {
+      return { proc: { string: obj.process } };
+    }
     const rec: Record<string, FinVmTagless | null> = {};
     for (const [k, v] of Object.entries(obj)) rec[k] = jsToValue(v);
     return { record: rec };
@@ -114,6 +128,12 @@ export function valueToJs(v: unknown): unknown {
   }
   if ('string' in obj) return obj.string;
   if ('symbol' in obj) return obj.symbol;
+  if ('proc' in obj && obj.proc && typeof obj.proc === 'object' && 'string' in obj.proc) {
+    return obj as FinVmTagless;
+  }
+  if ('process' in obj && typeof obj.process === 'string') {
+    return { proc: obj.process };
+  }
   if ('list' in obj && Array.isArray(obj.list)) return obj.list.map(valueToJs);
   if ('record' in obj && obj.record && typeof obj.record === 'object') {
     const out: Record<string, unknown> = {};
@@ -174,7 +194,11 @@ export function createFinvmHandlers(
     },
     'cache.get': async (p: { ns?: string; cacheKey?: string; key2?: string }) => {
       const key = String(p.cacheKey ?? p.key2 ?? '');
-      return storage.cacheGet(String(p.ns ?? ''), key);
+      const v = storage.cacheGet(String(p.ns ?? ''), key);
+      if (v && typeof v === 'object' && v !== null && 'proc' in v && typeof (v as { proc: unknown }).proc === 'string') {
+        return { proc: { string: String((v as { proc: string }).proc) } };
+      }
+      return v;
     },
     'cache.delete': async (p: { ns?: string; cacheKey?: string; key2?: string }) => {
       const key = String(p.cacheKey ?? p.key2 ?? '');
@@ -191,6 +215,10 @@ interface VmStepOutput {
   result?: unknown;
   state?: Record<string, FinVmTagless | null>;
   steps?: number;
+}
+
+function vmRunFinished(out: VmStepOutput): boolean {
+  return out.status === 'completed' || out.status === 'deadlock';
 }
 
 function parseVmOutput(raw: string): VmStepOutput {
@@ -210,7 +238,11 @@ export interface RunWithEffectsResult {
   ok: true;
   result: unknown;
   state: Record<string, unknown>;
+  /** Full FinVM machine snapshot (scheduler + processes + mailboxes). */
+  snapshot: unknown;
   steps: number;
+  /** FinVM quiescence status (`completed` or `deadlock` when background actors remain). */
+  vmStatus: string;
 }
 
 export interface RunWithEffectsError {
@@ -226,15 +258,29 @@ export async function runProgramWithEffects(
   programJson: string,
   opts: {
     state?: Record<string, unknown>;
+    /** Prior full machine snapshot (processes/mailboxes survive across notebook cells). */
+    machineSnapshot?: unknown;
+    /** VM function name for the cell entry (`main` after wrapBindingAsMain). */
+    entryFunction?: string;
     handlers: Record<string, (payload: Record<string, unknown>) => Promise<unknown>>;
   },
 ): Promise<RunWithEffectsResult | RunWithEffectsError> {
   try {
     const overrides = JSON.stringify({ input: {}, state: opts.state ?? {} });
-    let out = parseVmOutput(finvm.runEffectStart(programJson)(overrides));
+    let out: VmStepOutput;
+    if (opts.machineSnapshot != null) {
+      const entry = opts.entryFunction ?? 'main';
+      const regCount = registerCountForFunction(programJson, entry);
+      const patched = rebootMainInSnapshot(opts.machineSnapshot, entry, regCount);
+      out = parseVmOutput(
+        finvm.runEffectResume(programJson)(JSON.stringify(patched))(JSON.stringify([])),
+      );
+    } else {
+      out = parseVmOutput(finvm.runEffectStart(programJson)(overrides));
+    }
 
     for (let iter = 0; iter < MAX_ITERS; iter++) {
-      if (out.status === 'completed') {
+      if (vmRunFinished(out)) {
         const state = Object.fromEntries(
           Object.entries(out.state ?? {}).map(([k, v]) => [k, valueToJs(v)]),
         );
@@ -242,11 +288,13 @@ export async function runProgramWithEffects(
           ok: true,
           result: valueToJs(out.result),
           state,
+          snapshot: out.snapshot ?? null,
           steps: typeof out.steps === 'number' ? out.steps : 0,
+          vmStatus: out.status,
         };
       }
       if (out.status !== 'suspended') {
-        return { ok: false, error: `VM ${out.status}: expected suspended/completed` };
+        return { ok: false, error: `VM ${out.status}: expected suspended/completed/deadlock` };
       }
 
       const pending = Array.isArray(out.pending) ? out.pending : [];

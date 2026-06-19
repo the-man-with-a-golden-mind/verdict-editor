@@ -31,6 +31,8 @@ test("integration: notebook.mjs PS exports decode display kinds", async () => {
   assert.equal(typeof decode, "function");
   assert.equal(decode({ kind: "chart" }), "chart");
   assert.equal(decode({ kind: "stack" }), "stack");
+  assert.equal(decode({ kind: "row" }), "row");
+  assert.equal(decode({ kind: "col" }), "col");
 });
 
 test("integration: notebook.mjs bindingNamesExport scans decl names", async () => {

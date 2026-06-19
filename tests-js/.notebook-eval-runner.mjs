@@ -1,3 +1,92 @@
+// src/editor/finvmSnapshot.ts
+var FINVM_SNAPSHOT_KEY = "__finvm.snapshot";
+var FINVM_DB_KEY = "__finvm.db";
+var FINVM_SOURCE_SIG_KEY = "__finvm.sourceSig";
+function sourceSignature(source) {
+  let h = 5381;
+  const s = String(source || "");
+  for (let i = 0; i < s.length; i++) h = (h << 5) + h + s.charCodeAt(i) | 0;
+  return `${s.length}:${h >>> 0}`;
+}
+function splitNotebookFinvmState(finvmState) {
+  const {
+    [FINVM_SNAPSHOT_KEY]: machineSnapshot,
+    [FINVM_DB_KEY]: _db,
+    [FINVM_SOURCE_SIG_KEY]: sourceSig,
+    ...userState
+  } = finvmState;
+  return {
+    userState,
+    machineSnapshot: machineSnapshot ?? null,
+    sourceSig: typeof sourceSig === "string" ? sourceSig : null
+  };
+}
+function mergeNotebookFinvmState(parts) {
+  const out = { ...parts.userState };
+  if (parts.dbState) out[FINVM_DB_KEY] = parts.dbState;
+  if (parts.machineSnapshot != null) out[FINVM_SNAPSHOT_KEY] = parts.machineSnapshot;
+  if (parts.sourceSig) out[FINVM_SOURCE_SIG_KEY] = parts.sourceSig;
+  return out;
+}
+function registerCountForFunction(programJson, fn = "main") {
+  try {
+    const p = JSON.parse(programJson);
+    const rc = p.functions?.[fn]?.registerCount;
+    return typeof rc === "number" && rc > 0 ? rc : 16;
+  } catch {
+    return 16;
+  }
+}
+function rebootMainInSnapshot(snapshot, entryFunction = "main", registerCount = 16) {
+  const snap = JSON.parse(JSON.stringify(snapshot));
+  const others = (snap.processes ?? []).filter((p) => p.pid !== "main");
+  snap.processes = [
+    {
+      pid: "main",
+      status: { s: "ready" },
+      function: entryFunction,
+      frame: {
+        function: entryFunction,
+        pc: 0,
+        registers: Array.from({ length: registerCount }, () => null),
+        returnRegister: null,
+        caller: null
+      },
+      callStack: [],
+      mailbox: [],
+      links: [],
+      remoteLinks: [],
+      monitors: [],
+      parent: null,
+      children: [],
+      trapExit: false,
+      name: "main",
+      result: null,
+      error: null,
+      createdSequence: 0,
+      stepsExecuted: 0
+    },
+    ...others
+  ];
+  snap.readyQueue = ["main"];
+  snap.current = "main";
+  return snap;
+}
+function countLiveProcesses(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return 0;
+  const procs = snapshot.processes ?? [];
+  return procs.filter((p) => {
+    const status = p.status;
+    const tag = status && typeof status === "object" ? status.s : void 0;
+    return tag === "ready" || tag === "running" || tag === "waiting";
+  }).length;
+}
+function findProcess(snapshot, pid) {
+  if (!snapshot || typeof snapshot !== "object") return null;
+  const procs = snapshot.processes ?? [];
+  return procs.find((p) => p.pid === pid) ?? null;
+}
+
 // src/editor/effectDriver.ts
 function createEffectStorage() {
   const tables = /* @__PURE__ */ new Map();
@@ -74,6 +163,15 @@ function jsToValue(x) {
     if ("tag" in obj && "payload" in obj) {
       return { variant: { tag: obj.tag, payload: jsToValue(obj.payload) } };
     }
+    if (typeof obj.proc === "string") {
+      return { proc: { string: obj.proc } };
+    }
+    if (obj.proc && typeof obj.proc === "object" && "string" in obj.proc) {
+      return obj;
+    }
+    if (typeof obj.process === "string") {
+      return { proc: { string: obj.process } };
+    }
     const rec = {};
     for (const [k, v] of Object.entries(obj)) rec[k] = jsToValue(v);
     return { record: rec };
@@ -91,6 +189,12 @@ function valueToJs(v) {
   }
   if ("string" in obj) return obj.string;
   if ("symbol" in obj) return obj.symbol;
+  if ("proc" in obj && obj.proc && typeof obj.proc === "object" && "string" in obj.proc) {
+    return obj;
+  }
+  if ("process" in obj && typeof obj.process === "string") {
+    return { proc: obj.process };
+  }
   if ("list" in obj && Array.isArray(obj.list)) return obj.list.map(valueToJs);
   if ("record" in obj && obj.record && typeof obj.record === "object") {
     const out = {};
@@ -145,13 +249,20 @@ function createFinvmHandlers(storage, fetchImpl = globalThis.fetch.bind(globalTh
     },
     "cache.get": async (p) => {
       const key = String(p.cacheKey ?? p.key2 ?? "");
-      return storage.cacheGet(String(p.ns ?? ""), key);
+      const v = storage.cacheGet(String(p.ns ?? ""), key);
+      if (v && typeof v === "object" && v !== null && "proc" in v && typeof v.proc === "string") {
+        return { proc: { string: String(v.proc) } };
+      }
+      return v;
     },
     "cache.delete": async (p) => {
       const key = String(p.cacheKey ?? p.key2 ?? "");
       return storage.cacheDelete(String(p.ns ?? ""), key);
     }
   };
+}
+function vmRunFinished(out) {
+  return out.status === "completed" || out.status === "deadlock";
 }
 function parseVmOutput(raw) {
   const out = JSON.parse(raw);
@@ -167,9 +278,19 @@ var MAX_ITERS = 1e4;
 async function runProgramWithEffects(finvm, programJson, opts) {
   try {
     const overrides = JSON.stringify({ input: {}, state: opts.state ?? {} });
-    let out = parseVmOutput(finvm.runEffectStart(programJson)(overrides));
+    let out;
+    if (opts.machineSnapshot != null) {
+      const entry = opts.entryFunction ?? "main";
+      const regCount = registerCountForFunction(programJson, entry);
+      const patched = rebootMainInSnapshot(opts.machineSnapshot, entry, regCount);
+      out = parseVmOutput(
+        finvm.runEffectResume(programJson)(JSON.stringify(patched))(JSON.stringify([]))
+      );
+    } else {
+      out = parseVmOutput(finvm.runEffectStart(programJson)(overrides));
+    }
     for (let iter = 0; iter < MAX_ITERS; iter++) {
-      if (out.status === "completed") {
+      if (vmRunFinished(out)) {
         const state = Object.fromEntries(
           Object.entries(out.state ?? {}).map(([k, v]) => [k, valueToJs(v)])
         );
@@ -177,11 +298,13 @@ async function runProgramWithEffects(finvm, programJson, opts) {
           ok: true,
           result: valueToJs(out.result),
           state,
-          steps: typeof out.steps === "number" ? out.steps : 0
+          snapshot: out.snapshot ?? null,
+          steps: typeof out.steps === "number" ? out.steps : 0,
+          vmStatus: out.status
         };
       }
       if (out.status !== "suspended") {
-        return { ok: false, error: `VM ${out.status}: expected suspended/completed` };
+        return { ok: false, error: `VM ${out.status}: expected suspended/completed/deadlock` };
       }
       const pending = Array.isArray(out.pending) ? out.pending : [];
       if (pending.length === 0) {
@@ -213,6 +336,23 @@ async function runProgramWithEffects(finvm, programJson, opts) {
   } catch (e) {
     return { ok: false, error: String(e) };
   }
+}
+
+// src/editor/ideSession.ts
+var IDE_GLOBAL_FN = "ideGlobalLoop";
+var IDE_GLOBAL_CACHE_KEY = "global";
+function findIdeGlobalPid(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return null;
+  for (const p of snapshot.processes ?? []) {
+    if (p.function === IDE_GLOBAL_FN && typeof p.pid === "string") return p.pid;
+  }
+  return null;
+}
+function syncIdeGlobalProcCache(finvmState, storage) {
+  const { machineSnapshot } = splitNotebookFinvmState(finvmState);
+  const pid = findIdeGlobalPid(machineSnapshot);
+  if (!pid) return;
+  storage.cacheSet("ide", IDE_GLOBAL_CACHE_KEY, { proc: pid });
 }
 
 // src/editor/notebookBindingsCore.mjs
@@ -278,7 +418,7 @@ function vmValueToDisplay(value, typeSig) {
   const js = valueToJs(value);
   if (js && typeof js === "object" && !Array.isArray(js)) {
     const o = js;
-    if (typeof o.kind === "string" && ["text", "chart", "table", "stack"].includes(o.kind)) {
+    if (typeof o.kind === "string" && ["text", "chart", "table", "stack", "row", "col"].includes(o.kind)) {
       return o;
     }
   }
@@ -338,19 +478,28 @@ function mapDiagnosticsToCells(diagnostics, cells) {
   }
   return out;
 }
+function wrapBindingAsMain(src, bindingName) {
+  const escaped = bindingName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return src.replace(/\bmain\b/g, "__nbUserMain__").replace(new RegExp(`\\b${escaped}\\b`, "g"), "main");
+}
 function compileNotebookProgram(vlib, src, bindingName) {
   if (bindingName && typeof vlib.compileBindingEntryJS === "function") {
+    if (bindingName !== "main") {
+      const wrapped = wrapBindingAsMain(src, bindingName);
+      const rw = vlib.compileBindingEntryJS(wrapped, "main");
+      if (rw.ok) return { ok: true, output: rw.output, entry: "main" };
+    }
     const r2 = vlib.compileBindingEntryJS(src, bindingName);
-    return r2.ok ? { ok: true, output: r2.output } : { ok: false, error: r2.error };
+    return r2.ok ? { ok: true, output: r2.output, entry: bindingName } : { ok: false, error: r2.error };
   }
   if (typeof vlib.compileBindingsJS === "function") {
     const r2 = vlib.compileBindingsJS(src);
-    return r2.ok ? { ok: true, output: r2.output } : { ok: false, error: r2.error };
+    return r2.ok ? { ok: true, output: r2.output, entry: "main" } : { ok: false, error: r2.error };
   }
   const r = vlib.compileJS(src);
-  return r.ok ? { ok: true, output: r.output } : { ok: false, error: r.error };
+  return r.ok ? { ok: true, output: r.output, entry: "main" } : { ok: false, error: r.error };
 }
-async function runBindingOnFinvm(finvm, programJson, bindingName, finvmState, effectStorage) {
+async function runBindingOnFinvm(finvm, programJson, bindingName, finvmState, effectStorage, sourceSig) {
   try {
     const program = JSON.parse(programJson);
     if (!program.functions) return { ok: false, error: "Invalid compiled program" };
@@ -358,23 +507,29 @@ async function runBindingOnFinvm(finvm, programJson, bindingName, finvmState, ef
       return { ok: false, error: `Binding not runnable: ${bindingName}` };
     }
     program.entrypoint = bindingName;
+    const { userState, machineSnapshot, sourceSig: savedSig } = splitNotebookFinvmState(finvmState);
+    const snapshot = machineSnapshot != null && savedSig === sourceSig ? machineSnapshot : void 0;
     const vmOut = await runProgramWithEffects(finvm, JSON.stringify(program), {
-      state: finvmState,
+      state: userState,
+      machineSnapshot: snapshot,
+      entryFunction: bindingName,
       handlers: createFinvmHandlers(effectStorage)
     });
     if (!vmOut.ok) return { ok: false, error: vmOut.error };
     const dbState = effectDbTablesToFinvmState(effectStorage.listDbTables());
-    const nextState = {
-      ...vmOut.state,
-      "__finvm.db": dbState
-    };
+    const nextState = mergeNotebookFinvmState({
+      userState: vmOut.state,
+      machineSnapshot: vmOut.snapshot,
+      sourceSig,
+      dbState
+    });
     return { ok: true, result: vmOut.result, finvmState: nextState };
   } catch (e) {
     return { ok: false, error: String(e) };
   }
 }
-async function evalNotebookCells(ctx, source, names) {
-  const src = ctx.materialize(source);
+async function evalNotebookCells(ctx, source, names, opts) {
+  const src = ctx.materialize(source, opts?.cell);
   const sigs = ctx.vlib.signaturesJS(src);
   const sigOf = (n) => sigs.find((s) => s.name === n)?.signature ?? "";
   const useEvalBindingsJson = false;
@@ -401,6 +556,7 @@ async function evalNotebookCells(ctx, source, names) {
   let storage = ctx.getEffectStorage() ?? createEffectStorage();
   ctx.setEffectStorage(storage);
   let state = { ...ctx.getFinvmState() };
+  const srcSig = sourceSignature(src);
   const outputs = [];
   const seen = /* @__PURE__ */ new Set();
   const orderedNames = names.filter((n) => {
@@ -417,12 +573,14 @@ async function evalNotebookCells(ctx, source, names) {
       outputs.push({ name, ok: false, typeSig: sigOf(name), error: bindingCompile.error });
       continue;
     }
+    const entry = usePerBindingCompile ? bindingCompile.entry : name;
     const run = await runBindingOnFinvm(
       ctx.finvm,
       bindingCompile.output,
-      name,
+      entry,
       state,
-      storage
+      storage,
+      srcSig
     );
     if (!run.ok) {
       outputs.push({ name, ok: false, typeSig: sigOf(name), error: run.error });
@@ -430,6 +588,7 @@ async function evalNotebookCells(ctx, source, names) {
     }
     state = run.finvmState;
     ctx.setFinvmState(state);
+    syncIdeGlobalProcCache(state, storage);
     const display = vmValueToDisplay(run.result, sigOf(name));
     outputs.push({
       name,
@@ -453,10 +612,20 @@ function wrapVerdictLibForNotebook(vlib, notebookLib) {
   };
 }
 export {
+  FINVM_DB_KEY,
+  FINVM_SNAPSHOT_KEY,
+  FINVM_SOURCE_SIG_KEY,
   buildCellLineMap,
+  countLiveProcesses,
   createEffectStorage,
   evalNotebookCells,
+  findProcess,
   mapDiagnosticsToCells,
+  mergeNotebookFinvmState,
+  rebootMainInSnapshot,
+  runProgramWithEffects,
+  sourceSignature,
+  splitNotebookFinvmState,
   vmValueToDisplay,
   wrapVerdictLibForNotebook
 };

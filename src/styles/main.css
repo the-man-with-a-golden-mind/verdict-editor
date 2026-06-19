@@ -62,6 +62,24 @@ body {
 #verdict-viz-root details > summary::-webkit-details-marker { display: none; }
 
 /* ── Notebook chunks ─────────────────────────────────────────────────────────── */
+.notebook-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.notebook-cell {
+  border-radius: 6px;
+}
+
+.notebook-cell[data-cell-focused="1"] {
+  box-shadow: inset 4px 0 0 rgb(129 140 248 / 0.95), 0 0 0 1px rgb(129 140 248 / 0.22);
+}
+
+.notebook-cell[data-cell-focused="1"] .notebook-cell-gutter {
+  background: rgb(15 23 42 / 0.98);
+}
+
 .notebook-cell-gutter .notebook-gutter-btn[data-run-cell="1"],
 .notebook-cell-gutter .notebook-gutter-run {
   border-color: rgb(16 185 129 / 0.4);
@@ -93,6 +111,10 @@ body {
   font-size: 0.75rem;
 }
 
+.notebook-cell-status.hidden {
+  display: none;
+}
+
 .notebook-cell--maximized {
   min-height: calc(100% - 0.5rem);
   display: flex;
@@ -101,6 +123,23 @@ body {
 
 .notebook-stack--maximized {
   padding: 0.5rem !important;
+}
+
+.notebook-display-col {
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid #1e293b;
+}
+.notebook-display-col:last-child {
+  border-bottom: none;
+}
+.notebook-display-heading {
+  letter-spacing: 0.02em;
+}
+.notebook-display-row__item {
+  min-height: 300px;
+}
+.notebook-chart--row .js-plotly-plot {
+  overflow: visible;
 }
 
 .notebook-cell-editor-resizer,

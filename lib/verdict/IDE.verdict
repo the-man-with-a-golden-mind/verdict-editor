@@ -1,0 +1,60 @@
+module IDE exposing (idePut, ideGet, registerWorker, ask, ensureGlobal, bootGlobal)
+
+type IdeMsg = MkIdeRegister({ sourceCell : String, role : String, pid : Pid, reply : Pid }) | MkIdeRoute({ role : String, payload : Json, reply : Pid })
+
+ideKey : String -> String -> String
+ideKey ns key = strConcat(ns, strConcat("/", key))
+
+idePut : String -> String -> Json -> Unit
+idePut ns key value =
+  let _ = cacheSet("ide", ideKey(ns, key), value) in
+  unit
+
+ideGet : String -> String -> Json
+ideGet ns key = cacheGet("ide", ideKey(ns, key))
+
+findRolePidGo : String -> List { role : String, sourceCell : String, pid : Pid } -> Int -> Pid
+findRolePidGo role roles i =
+  if i == length(roles) then self()
+  else if get(roles, i).role == role then get(roles, i).pid
+  else findRolePidGo(role, roles, i + 1)
+
+ideHandle : IdeMsg -> List { role : String, sourceCell : String, pid : Pid } -> { stop : Bool, state : List { role : String, sourceCell : String, pid : Pid } }
+ideHandle msg roles =
+  match msg {
+    MkIdeRegister row ->
+      let next = append(roles, { role = row.role, sourceCell = row.sourceCell, pid = row.pid }) in
+      let _ = send(row.reply, unit) in
+      actorContinue(next),
+    MkIdeRoute row ->
+      let pid = findRolePidGo(row.role, roles, 0) in
+      let _ = send(pid, row.payload) in
+      let _ = send(row.reply, { ok = unit }) in
+      actorContinue(roles)
+  }
+
+ideGlobalLoop : List { role : String, sourceCell : String, pid : Pid } -> Unit
+ideGlobalLoop roles = actorLoop(ideHandle, roles)
+
+globalRef : Unit -> ActorRef IdeMsg
+globalRef _ =
+  let row = cacheGet("ide", "global") in
+  MkActorRef(row.proc)
+
+ensureGlobal : Unit -> ActorRef IdeMsg
+ensureGlobal _ = globalRef(unit)
+
+bootGlobal : Unit -> ActorRef IdeMsg
+bootGlobal _ = MkActorRef(spawn(ideGlobalLoop, []))
+
+registerWorker : ActorRef IdeMsg -> String -> String -> ActorRef m -> Unit
+registerWorker ref role sourceCell worker =
+  let me = self() in
+  let _ = actorSend(ref, MkIdeRegister({ sourceCell = sourceCell, role = role, pid = actorPid(worker), reply = me })) in
+  recv()
+
+ask : ActorRef IdeMsg -> String -> Json -> Json
+ask ref role payload =
+  let me = self() in
+  let _ = actorSend(ref, MkIdeRoute({ role = role, payload = payload, reply = me })) in
+  recv()

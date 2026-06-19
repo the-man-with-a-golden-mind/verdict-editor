@@ -2,6 +2,7 @@
 /**
  * Adds compileBindingsJS, compileBindingEntryJS, and evalBindingsJsonJS to verdict.mjs
  * for notebook per-cell eval (each nullary binding compiled as its own entry).
+ * Also injects lib/verdict/Actor.verdict and lib/verdict/IDE.verdict into compileBindings.
  */
 import fs from "fs";
 import path from "path";
@@ -9,15 +10,183 @@ import { fileURLToPath } from "url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const srcPath = path.join(root, "public/lib/verdict.mjs");
+const actorPath = path.join(root, "lib/verdict/Actor.verdict");
+const idePath = path.join(root, "lib/verdict/IDE.verdict");
 const outPath = path.join(root, "public/lib/verdict-notebook.mjs");
 
 let code = fs.readFileSync(srcPath, "utf8");
 
 const patchStart = code.indexOf("\nvar compileBindingsJS = function");
-const exportStart = code.lastIndexOf("\nexport {");
+let exportStart = code.lastIndexOf("\nexport {");
 if (patchStart >= 0 && exportStart > patchStart) {
   code = code.slice(0, patchStart) + code.slice(exportStart);
+  exportStart = code.lastIndexOf("\nexport {");
 }
+
+const actorSource = fs.readFileSync(actorPath, "utf8").trim();
+const ideSource = fs.readFileSync(idePath, "utf8").trim();
+const actorLibraryLiteral = JSON.stringify("\n" + actorSource + "\n");
+const ideLibraryLiteral = JSON.stringify("\n" + ideSource + "\n");
+
+const libraryLinkHelpers = [
+  "var usesActorLibrary = function(src) {",
+  "  return /\\b(spawnCounter|counterAdd|counterGet|spawnRegistry|registryPut|registryGetPid)\\b/.test(src);",
+  "};",
+  "var usesIdeLibrary = function(src) {",
+  "  return /\\b(ensureGlobal|bootGlobal|registerWorker|ask\\b|idePut|ideGet)\\b/.test(src);",
+  "};",
+  "var linkLibrary = function(source, base) {",
+  "  var vLib = parseVerdict(source);",
+  "  if (vLib instanceof Left) {",
+  '    throw new Error("internal error: library failed to parse");',
+  "  }",
+  "  if (vLib instanceof Right) {",
+  "    return linkAll(vLib.value0)(base);",
+  "  }",
+  '  throw new Error("internal error: library parse unexpected");',
+  "};",
+  "var linkBindingsModule = function(src, userMod, preludeMod) {",
+  "  var base = preludeMod;",
+  "  if (usesActorLibrary(src)) {",
+  "    base = linkLibrary(actorLibrarySource, base);",
+  "  }",
+  "  if (usesIdeLibrary(src)) {",
+  "    base = linkLibrary(ideLibrarySource, base);",
+  "  }",
+  "  return linkAll(userMod)(base);",
+  "};",
+  "",
+].join("\n");
+
+code = code.replace(/\nvar actorLibrarySource = "[^"]*";?\n/g, "\n");
+code = code.replace(/\nvar ideLibrarySource = "[^"]*";?\n/g, "\n");
+code = code.replace(/\nvar usesActorLibrary = function[\s\S]*?\n\};\nvar linkBindingsModule[\s\S]*?\n\};\n/g, "\n");
+code = code.replace(
+  /var preludeSource = '/,
+  `var actorLibrarySource = ${actorLibraryLiteral};\nvar ideLibrarySource = ${ideLibraryLiteral};\n${libraryLinkHelpers}var preludeSource = '`,
+);
+
+code = code.replace(
+  /var compileBindings = function\(src\) \{[\s\S]*?\n\};\nvar evalBindingsJS/,
+  [
+    "var compileBindings = function(src) {",
+      "  var v = parseVerdict(src);",
+      "  if (v instanceof Left) {",
+      '    return new Left("Parse error: " + show17(v.value0));',
+      "  }",
+      "  ;",
+      "  if (v instanceof Right) {",
+      "    var v1 = parseVerdict(preludeSource);",
+      "    if (v1 instanceof Left) {",
+      '      return new Left("internal error: prelude failed to parse");',
+      "    }",
+      "    ;",
+      "    if (v1 instanceof Right) {",
+      "      var mod5;",
+      "      try {",
+      "        mod5 = linkBindingsModule(src, v.value0, v1.value0);",
+      "      } catch (err) {",
+      "        return new Left(String(err.message || err));",
+      "      }",
+      "      var v2 = checkModule(mod5);",
+      "      if (v2 instanceof Left) {",
+      '        return new Left("Type error: " + showTypeError(v2.value0));',
+      "      }",
+      "      ;",
+      "      if (v2 instanceof Right) {",
+      "        var lowered = lowerModule(monomorphize(mod5));",
+      "        var emitFuncs = map211(function($108) {",
+      "          return toEmitFunc(optimize($108));",
+      "        })(lowered.funcs);",
+      "        return new Right(assemble(emitFuncs)(lowered.entry));",
+      "      }",
+      "      ;",
+      '      throw new Error("Failed pattern match at Verdict.Compiler (line 106, column 10 - line 113, column 53): " + [v2.constructor.name]);',
+      "    }",
+      "    ;",
+      '    throw new Error("Failed pattern match at Verdict.Compiler (line 102, column 20 - line 113, column 53): " + [v1.constructor.name]);',
+      "  }",
+      "  ;",
+      '  throw new Error("Failed pattern match at Verdict.Compiler (line 100, column 23 - line 113, column 53): " + [v.constructor.name]);',
+      "};",
+      "var evalBindingsJS",
+    ].join("\n"),
+);
+
+code = code.replace(
+  /var diagnosticsJS = function\(src\) \{[\s\S]*?\n\};\nvar compileProject/,
+  [
+    "var diagnosticsJS = function(src) {",
+    "  var parseDiag = function(perr) {",
+    "    var v3 = parseErrorPosition(perr);",
+    "    return {",
+    "      line: v3.line,",
+    "      column: v3.column,",
+    "      message: parseErrorMessage(perr),",
+    '      severity: "error"',
+    "    };",
+    "  };",
+    "  var v = parseVerdict(src);",
+    "  if (v instanceof Left) {",
+    "    return [parseDiag(v.value0)];",
+    "  }",
+    "  ;",
+    "  if (v instanceof Right) {",
+    "    var v1 = parseVerdict(preludeSource);",
+    "    if (v1 instanceof Left) {",
+    "      return [];",
+    "    }",
+    "    ;",
+    "    if (v1 instanceof Right) {",
+    "      var mod5;",
+    "      try {",
+    "        mod5 = linkBindingsModule(src, v.value0, v1.value0);",
+    "      } catch (err) {",
+    "        return [];",
+    "      }",
+    "      var v2 = checkModule(mod5);",
+    "      if (v2 instanceof Left) {",
+    "        var l = locate(v2.value0);",
+    "        return [{",
+    "          line: l.line,",
+    "          column: l.column,",
+    "          message: l.message,",
+    '          severity: "error"',
+    "        }];",
+    "      }",
+    "      ;",
+    "      if (v2 instanceof Right) {",
+    "        return [];",
+    "      }",
+    "      ;",
+    '      throw new Error("Failed pattern match at Verdict.Compiler (line 198, column 25 - line 202, column 20): " + [v2.constructor.name]);',
+    "    }",
+    "    ;",
+    '    throw new Error("Failed pattern match at Verdict.Compiler (line 196, column 20 - line 202, column 20): " + [v1.constructor.name]);',
+    "  }",
+    "  ;",
+    '  throw new Error("Failed pattern match at Verdict.Compiler (line 194, column 21 - line 202, column 20): " + [v.constructor.name]);',
+    "};",
+    "var compileProject",
+  ].join("\n"),
+);
+
+code = code.replace(
+  "  return append9(sigsOf(src))(sigsOf(preludeSource));\n};",
+  [
+    "  var sigs = append9(sigsOf(src))(sigsOf(preludeSource));",
+    "  if (usesActorLibrary(src)) {",
+    "    sigs = append9(sigs)(sigsOf(actorLibrarySource));",
+    "  }",
+    "  if (usesIdeLibrary(src)) {",
+    "    sigs = append9(sigs)(sigsOf(ideLibrarySource));",
+    "  }",
+    "  return sigs;",
+    "};",
+  ].join("\n"),
+);
+
+exportStart = code.lastIndexOf("\nexport {");
 
 const insert = [
   "",
@@ -73,7 +242,7 @@ const insert = [
   "  }",
   "  if (targetIdx < 0) return src;",
   "  var target = blocks[targetIdx];",
-  // The underlying compiler always picks a binding named `main` as the program",
+  "  // The underlying compiler always picks a binding named `main` as the program",
   "  // entrypoint when one exists, otherwise the first declaration. So merely",
   "  // reordering the target to the top is not enough when the program also",
   "  // defines `main` (e.g. notebook cell 1). Drop the `main` block when the",

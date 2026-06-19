@@ -16,6 +16,8 @@ data DisplayKind
   | ChartKind
   | TableKind
   | StackKind
+  | RowKind
+  | ColKind
   | UnknownKind
 
 foreign import decodeDisplayKindImpl :: Foreign -> String
@@ -28,6 +30,8 @@ decodeDisplayKind f =
     "chart" -> Just ChartKind
     "table" -> Just TableKind
     "stack" -> Just StackKind
+    "row" -> Just RowKind
+    "col" -> Just ColKind
     _ -> Just UnknownKind
 
 renderDisplayIntoExport :: EffectFn3 Foreign Foreign Foreign Unit

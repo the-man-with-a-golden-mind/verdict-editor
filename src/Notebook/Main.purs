@@ -57,6 +57,8 @@ decodeDisplayKindExport = mkEffectFn1 \raw ->
     Just D.ChartKind -> "chart"
     Just D.TableKind -> "table"
     Just D.StackKind -> "stack"
+    Just D.RowKind -> "row"
+    Just D.ColKind -> "col"
     Just D.UnknownKind -> "unknown"
     Nothing -> "unknown")
 

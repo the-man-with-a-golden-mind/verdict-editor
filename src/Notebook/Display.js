@@ -43,6 +43,32 @@ async function renderChart(host, spec, bridge) {
   await renderChartImpl(host)(spec)(bridge)();
 }
 
+async function renderLayout(host, d, bridge, layoutKind) {
+  const layouts = {
+    stack: { className: "flex flex-col gap-6 notebook-stack", dataset: "displayStack" },
+    col: { className: "flex flex-col gap-6 notebook-display-col", dataset: "displayCol" },
+    row: { className: "flex flex-row flex-wrap gap-5 notebook-display-row", dataset: "displayRow" },
+  };
+  const cfg = layouts[layoutKind];
+  const layoutEl = document.createElement("div");
+  layoutEl.className = cfg.className;
+  layoutEl.dataset[cfg.dataset] = "1";
+  if (d.title) {
+    const heading = document.createElement("div");
+    heading.className = "text-sm font-semibold text-slate-100 notebook-display-heading";
+    heading.textContent = d.title;
+    layoutEl.appendChild(heading);
+  }
+  for (const item of d.items ?? []) {
+    const child = document.createElement("div");
+    child.className =
+      layoutKind === "row" ? "notebook-display-row__item min-w-[min(100%,380px)] flex-1" : "";
+    layoutEl.appendChild(child);
+    await renderDisplayInto(child, item, bridge);
+  }
+  host.appendChild(layoutEl);
+}
+
 export async function renderDisplayInto(host, raw, bridge) {
   host.innerHTML = "";
   const d = decodeDisplay(raw);
@@ -58,9 +84,11 @@ export async function renderDisplayInto(host, raw, bridge) {
     return;
   }
   if (d.kind === "chart") {
+    const inRow = host.closest?.("[data-display-row]");
     const chartHost = document.createElement("div");
-    chartHost.className = "min-h-[280px] w-full";
+    chartHost.className = inRow ? "min-h-[300px] w-full notebook-chart--row" : "min-h-[320px] w-full";
     chartHost.dataset.plotlyChart = "1";
+    if (inRow) chartHost.dataset.plotlyCompact = "1";
     host.appendChild(chartHost);
     await renderChart(chartHost, d, bridge);
     return;
@@ -69,16 +97,8 @@ export async function renderDisplayInto(host, raw, bridge) {
     renderSpreadsheetTable(host, d.rows ?? []);
     return;
   }
-  if (d.kind === "stack") {
-    const stackEl = document.createElement("div");
-    stackEl.className = "flex flex-col gap-3 notebook-stack";
-    stackEl.dataset.displayStack = "1";
-    for (const item of d.items ?? []) {
-      const child = document.createElement("div");
-      stackEl.appendChild(child);
-      await renderDisplayInto(child, item, bridge);
-    }
-    host.appendChild(stackEl);
+  if (d.kind === "stack" || d.kind === "col" || d.kind === "row") {
+    await renderLayout(host, d, bridge, d.kind);
   }
 }
 

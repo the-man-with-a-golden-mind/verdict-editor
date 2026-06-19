@@ -6,6 +6,12 @@ import {
   valueToJs,
   type EffectStorage,
 } from './effectDriver';
+import {
+  mergeNotebookFinvmState,
+  sourceSignature,
+  splitNotebookFinvmState,
+} from './finvmSnapshot';
+import { materializeIdeCellPlaceholders, syncIdeGlobalProcCache } from './ideSession';
 import type { CellOutput } from './notebookBridge';
 import { filterCellBindingNamesToRunnable } from './notebookBindings';
 
@@ -97,7 +103,7 @@ export function vmValueToDisplay(value: unknown, typeSig: string): unknown {
   const js = valueToJs(value);
   if (js && typeof js === 'object' && !Array.isArray(js)) {
     const o = js as Record<string, unknown>;
-    if (typeof o.kind === 'string' && ['text', 'chart', 'table', 'stack'].includes(o.kind)) {
+    if (typeof o.kind === 'string' && ['text', 'chart', 'table', 'stack', 'row', 'col'].includes(o.kind)) {
       return o;
     }
   }
@@ -169,21 +175,54 @@ export function mapDiagnosticsToCells(
   return out;
 }
 
+/**
+ * Wrap a target binding so it is compiled as the program's `main`.
+ *
+ * The Verdict compiler lowers the entry declaration specially (effect
+ * continuations only resume correctly for the function named `main`). A binding
+ * compiled as its own standalone entry that transitively performs an effect
+ * (e.g. reading shared history via `cache.get`) returns the raw effect value
+ * instead of the post-effect computation — the continuation is dropped. Routing
+ * the value through a synthetic `main = <binding>` makes `main` the real entry,
+ * so the effectful chain runs under the entry process and resumes correctly.
+ *
+ * We promote the target binding to be `main` by renaming it (carrying its own
+ * type annotation) rather than synthesising `main : <sig>`, because the
+ * compiler's signature output is an internal, non-surface representation that
+ * is not valid as a type annotation (notably for record types).
+ */
+function wrapBindingAsMain(src: string, bindingName: string): string {
+  // Move any existing user `main` out of the way, then rename the target binding
+  // (definition, signature, and references) to `main`.
+  const escaped = bindingName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return src
+    .replace(/\bmain\b/g, '__nbUserMain__')
+    .replace(new RegExp(`\\b${escaped}\\b`, 'g'), 'main');
+}
+
 function compileNotebookProgram(
   vlib: VerdictLib,
   src: string,
   bindingName?: string,
-): { ok: true; output: string } | { ok: false; error: string } {
+): { ok: true; output: string; entry: string } | { ok: false; error: string } {
   if (bindingName && typeof vlib.compileBindingEntryJS === 'function') {
+    // Non-`main` bindings: promote the target to `main` so effect continuations
+    // resume correctly (see wrapBindingAsMain).
+    if (bindingName !== 'main') {
+      const wrapped = wrapBindingAsMain(src, bindingName);
+      const rw = vlib.compileBindingEntryJS(wrapped, 'main');
+      if (rw.ok) return { ok: true, output: rw.output, entry: 'main' };
+      // Fall through to the standalone compile if promotion failed to compile.
+    }
     const r = vlib.compileBindingEntryJS(src, bindingName);
-    return r.ok ? { ok: true, output: r.output } : { ok: false, error: r.error };
+    return r.ok ? { ok: true, output: r.output, entry: bindingName } : { ok: false, error: r.error };
   }
   if (typeof vlib.compileBindingsJS === 'function') {
     const r = vlib.compileBindingsJS(src);
-    return r.ok ? { ok: true, output: r.output } : { ok: false, error: r.error };
+    return r.ok ? { ok: true, output: r.output, entry: 'main' } : { ok: false, error: r.error };
   }
   const r = vlib.compileJS(src);
-  return r.ok ? { ok: true, output: r.output } : { ok: false, error: r.error };
+  return r.ok ? { ok: true, output: r.output, entry: 'main' } : { ok: false, error: r.error };
 }
 
 async function runBindingOnFinvm(
@@ -192,6 +231,7 @@ async function runBindingOnFinvm(
   bindingName: string,
   finvmState: Record<string, unknown>,
   effectStorage: EffectStorage,
+  sourceSig: string,
 ): Promise<{ ok: true; result: unknown; finvmState: Record<string, unknown> } | { ok: false; error: string }> {
   try {
     const program = JSON.parse(programJson) as {
@@ -203,16 +243,23 @@ async function runBindingOnFinvm(
       return { ok: false, error: `Binding not runnable: ${bindingName}` };
     }
     program.entrypoint = bindingName;
+    const { userState, machineSnapshot, sourceSig: savedSig } = splitNotebookFinvmState(finvmState);
+    const snapshot =
+      machineSnapshot != null && savedSig === sourceSig ? machineSnapshot : undefined;
     const vmOut = await runProgramWithEffects(finvm, JSON.stringify(program), {
-      state: finvmState,
+      state: userState,
+      machineSnapshot: snapshot,
+      entryFunction: bindingName,
       handlers: createFinvmHandlers(effectStorage),
     });
     if (!vmOut.ok) return { ok: false, error: vmOut.error };
     const dbState = effectDbTablesToFinvmState(effectStorage.listDbTables());
-    const nextState = {
-      ...vmOut.state,
-      '__finvm.db': dbState,
-    };
+    const nextState = mergeNotebookFinvmState({
+      userState: vmOut.state,
+      machineSnapshot: vmOut.snapshot,
+      sourceSig,
+      dbState,
+    });
     return { ok: true, result: vmOut.result, finvmState: nextState };
   } catch (e) {
     return { ok: false, error: String(e) };
@@ -226,15 +273,20 @@ export type NotebookEvalContext = {
   setFinvmState: (s: Record<string, unknown>) => void;
   getEffectStorage: () => EffectStorage;
   setEffectStorage: (s: EffectStorage) => void;
-  materialize: (source: string) => string;
+  materialize: (source: string, cell?: { id?: string; index?: number }) => string;
+};
+
+export type NotebookEvalOptions = {
+  cell?: { id?: string; index?: number };
 };
 
 export async function evalNotebookCells(
   ctx: NotebookEvalContext,
   source: string,
   names: string[],
+  opts?: NotebookEvalOptions,
 ): Promise<CellOutput[]> {
-  const src = ctx.materialize(source);
+  const src = ctx.materialize(source, opts?.cell);
   const sigs = ctx.vlib.signaturesJS(src);
   const sigOf = (n: string) => sigs.find((s) => s.name === n)?.signature ?? '';
 
@@ -267,6 +319,7 @@ export async function evalNotebookCells(
   let storage = ctx.getEffectStorage() ?? createEffectStorage();
   ctx.setEffectStorage(storage);
   let state = { ...ctx.getFinvmState() };
+  const srcSig = sourceSignature(src);
 
   const outputs: CellOutput[] = [];
   const seen = new Set<string>();
@@ -289,12 +342,14 @@ export async function evalNotebookCells(
       outputs.push({ name, ok: false, typeSig: sigOf(name), error: bindingCompile.error });
       continue;
     }
+    const entry = usePerBindingCompile ? bindingCompile.entry : name;
     const run = await runBindingOnFinvm(
       ctx.finvm,
       bindingCompile.output,
-      name,
+      entry,
       state,
       storage,
+      srcSig,
     );
     if (!run.ok) {
       outputs.push({ name, ok: false, typeSig: sigOf(name), error: run.error });
@@ -302,6 +357,7 @@ export async function evalNotebookCells(
     }
     state = run.finvmState;
     ctx.setFinvmState(state);
+    syncIdeGlobalProcCache(state, storage);
     const display = vmValueToDisplay(run.result, sigOf(name));
     outputs.push({
       name,

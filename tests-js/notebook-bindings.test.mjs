@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { pathToFileURL } from "url";
 import path from "path";
 import { fileURLToPath } from "url";
+import fs from "fs";
 import { buildCellLineMap } from "./notebook-helpers.mjs";
 import {
   bindingNamesFromSourceScan,
@@ -103,4 +104,44 @@ test("verdict-notebook: evalBindingsJsonJS returns structured json", async () =>
   assert.equal(out[0].ok, true);
   assert.equal(out[0].typeSig, "Int");
   assert.equal(out[0].json?.int, "42");
+});
+
+import { DEFAULT_NOTEBOOK_SIM_CELL_LINES } from "../src/editor/defaultNotebookSimCell.mjs";
+
+function defaultExampleProgramFromEditor() {
+  const ts = fs.readFileSync(path.join(root, "src/VerdictEditor.ts"), "utf8");
+  const m = ts.match(/const DEFAULT_NOTEBOOK_CELL_1 = \[([\s\S]*?)\];/);
+  if (!m) throw new Error("DEFAULT_NOTEBOOK_CELL_1 array not found in VerdictEditor.ts");
+  const cell1 = eval("[" + m[1] + "]").join("\n");
+  const cell2 = DEFAULT_NOTEBOOK_SIM_CELL_LINES.join("\n");
+  return cell1 + "\n" + cell2;
+}
+
+function materializeDefaultInputs(source) {
+  let code = source;
+  const inputs = {
+    assetsCsv: "BTCUSD,ETHUSD,ADAUSD",
+    signalThreshold: 2,
+    positionBias: 0,
+    telegramBotToken: "",
+    telegramChatId: "",
+  };
+  for (const [key, value] of Object.entries(inputs)) {
+    const lit = typeof value === "number" ? String(value) : JSON.stringify(value);
+    code = code.replaceAll(`__INPUT_${key}__`, lit);
+  }
+  return code.replace(/__INPUT_[A-Za-z0-9_]+__/g, "0");
+}
+
+test("bindings: default example program parses and exposes main + simReport", async () => {
+  const v = await import(pathToFileURL(path.join(root, "public/lib/verdict-notebook.mjs")).href);
+  const raw = defaultExampleProgramFromEditor();
+  const src = materializeDefaultInputs(raw);
+  const errs = v.diagnosticsJS(src).filter((d) => d.severity !== "warning");
+  assert.equal(errs.length, 0, errs.map((e) => `L${e.line}: ${e.message}`).join("; "));
+  assert.deepEqual(v.nullaryBindingsJS(src).sort(), ["main", "simReport"]);
+  for (const name of ["main", "simReport"]) {
+    const c = v.compileBindingEntryJS(src, name);
+    assert.equal(c.ok, true, c.error ?? name);
+  }
 });

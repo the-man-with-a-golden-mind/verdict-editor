@@ -1,0 +1,71 @@
+module Actor exposing (spawnCounter, counterAdd, counterGet, spawnRegistry, registryPut, registryGetPid)
+
+type CounterMsg = MkCounterAdd({ amount : Int, reply : Pid }) | MkCounterGet({ reply : Pid })
+
+type RegMsg = MkRegPut({ label : String, pid : Pid }) | MkRegGet({ label : String, reply : Pid })
+
+-- Counter server ---------------------------------------------------------------
+
+counterHandle : CounterMsg -> Int -> { stop : Bool, state : Int }
+counterHandle msg count =
+  match msg {
+    MkCounterAdd row ->
+      let _ = send(row.reply, count + row.amount) in
+      actorContinue(count + row.amount),
+    MkCounterGet row ->
+      let _ = send(row.reply, count) in
+      actorContinue(count)
+  }
+
+counterLoop : Int -> Unit
+counterLoop state = actorLoop(counterHandle, state)
+
+spawnCounter : Unit -> ActorRef CounterMsg
+spawnCounter _ = MkActorRef(spawn(counterLoop, 0))
+
+counterAdd : ActorRef CounterMsg -> Int -> Int
+counterAdd ref n =
+  let me = self() in
+  let _ = actorSend(ref, MkCounterAdd({ amount = n, reply = me })) in
+  recv()
+
+counterGet : ActorRef CounterMsg -> Int
+counterGet ref =
+  let me = self() in
+  let _ = actorSend(ref, MkCounterGet({ reply = me })) in
+  recv()
+
+-- Name registry server ---------------------------------------------------------
+
+lookupLabelGo : String -> List { label : String, pid : Pid } -> Int -> Pid
+lookupLabelGo label entries i =
+  if i == length(entries) then self()
+  else if get(entries, i).label == label then get(entries, i).pid
+  else lookupLabelGo(label, entries, i + 1)
+
+registryHandle : RegMsg -> List { label : String, pid : Pid } -> { stop : Bool, state : List { label : String, pid : Pid } }
+registryHandle msg entries =
+  match msg {
+    MkRegPut row -> actorContinue(append(entries, { label = row.label, pid = row.pid })),
+    MkRegGet row ->
+      let found = lookupLabelGo(row.label, entries, 0) in
+      let _ = send(row.reply, found) in
+      actorContinue(entries)
+  }
+
+registryLoop : List { label : String, pid : Pid } -> Unit
+registryLoop entries = actorLoop(registryHandle, entries)
+
+spawnRegistry : Unit -> ActorRef RegMsg
+spawnRegistry _ = MkActorRef(spawn(registryLoop, []))
+
+registryPut : ActorRef RegMsg -> String -> Pid -> Unit
+registryPut ref label pid =
+  let _ = actorSend(ref, MkRegPut({ label = label, pid = pid })) in
+  unit
+
+registryGetPid : ActorRef RegMsg -> String -> Pid
+registryGetPid ref label =
+  let me = self() in
+  let _ = actorSend(ref, MkRegGet({ label = label, reply = me })) in
+  recv()

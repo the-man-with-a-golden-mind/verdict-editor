@@ -14,18 +14,25 @@ test("display: decodeDisplay handles all kinds", () => {
     items: [
       { kind: "text", text: "hello" },
       {
-        kind: "chart",
-        title: "Demo",
-        traces: [{ name: "s", kind: "line", x: [1, 2], y: [3, 4] }],
-        xaxis: { title: "x" },
-        yaxis: { title: "y" },
+        kind: "row",
+        items: [
+          {
+            kind: "chart",
+            title: "Demo",
+            traces: [{ name: "s", kind: "line", x: [1, 2], y: [3, 4] }],
+            xaxis: { title: "x" },
+            yaxis: { title: "y" },
+          },
+        ],
       },
-      { kind: "table", rows: [{ a: 1 }] },
+      { kind: "col", items: [{ kind: "table", rows: [{ a: 1 }] }] },
     ],
   };
   const d = decodeDisplay(stack);
   assert.equal(d.kind, "stack");
   assert.equal(d.items.length, 3);
+  assert.equal(d.items[1].kind, "row");
+  assert.equal(d.items[2].kind, "col");
 });
 
 test("display: spreadsheetCsvExport from PS", async () => {

@@ -20,13 +20,31 @@ export type GlobalOutputSection = {
   cellId: string;
   outputs: CellOutput[];
   error?: string;
+  /** Nav metadata for the merged Cells panel (present once the notebook publishes). */
+  kind?: 'code' | 'text';
+  preview?: string;
+  running?: boolean;
+  focused?: boolean;
+  hasOutput?: boolean;
+  /** Output renders inline in the cell body; the panel shows nav + run only. */
+  local?: boolean;
+};
+
+export type NotebookEvalCellOpts = {
+  signal?: AbortSignal;
+  cellId?: string;
+  cellIndex?: number;
 };
 
 export type NotebookBridge = {
   compile: (source: string) => { ok: boolean; error?: string };
-  evalCells: (source: string, names: string[]) => CellOutput[] | Promise<CellOutput[]>;
+  evalCells: (
+    source: string,
+    names: string[],
+    opts?: NotebookEvalCellOpts,
+  ) => CellOutput[] | Promise<CellOutput[]>;
   onProgramChanged: (source: string) => void;
-  materialize: (source: string) => string;
+  materialize: (source: string, cell?: { id?: string; index?: number }) => string;
   monaco: typeof monaco;
   loadPlotly: () => Promise<unknown>;
   /** Render notebook cell outputs routed to the right-side Output panel. */
@@ -37,8 +55,8 @@ export type NotebookBridge = {
   /** Map compiler diagnostics to per-cell line errors. */
   cellDiagnostics: (source: string, cells: NotebookCellInfo[]) => Record<string, Array<{ line: number; message: string }>>;
   /** Load / save `.vnb` document JSON. */
-  loadDocument: () => { cells: NotebookCellInfo[] } | null;
-  saveDocument: (doc: { cells: NotebookCellInfo[] }) => void;
+  loadDocument: () => { cells: NotebookCellInfo[]; seedSig?: string } | null;
+  saveDocument: (doc: { cells: NotebookCellInfo[]; seedSig?: string }) => void;
   /** Binding names in a cell (astJS when available, else line scan). */
   bindingNamesInCell: (
     cellId: string,
@@ -53,8 +71,12 @@ export type NotebookApi = {
   notebookDocumentSource: () => string;
   setSource: (source: string) => void;
   getViewMode: () => string;
-  /** Re-run every cell (used by the live loop to keep cells updating each tick). */
+  /** Re-run every code cell once (top to bottom). */
   runAll?: () => void | Promise<void>;
+  /** Run / stop / focus a cell by id — driven from the merged Cells panel. */
+  runCellById?: (id: string) => void | Promise<void>;
+  stopCellById?: (id: string) => void;
+  focusCellById?: (id: string) => void;
 };
 
 type VerdictLib = {
@@ -83,9 +105,13 @@ export async function loadNotebookDisplayRenderer(): Promise<
 
 export function createNotebookBridge(deps: {
   vlib: VerdictLib | null;
-  materialize: (source: string) => string;
+  materialize: (source: string, cell?: { id?: string; index?: number }) => string;
   onProgramChanged: (source: string) => void;
-  evalCells: (source: string, names: string[]) => CellOutput[] | Promise<CellOutput[]>;
+  evalCells: (
+    source: string,
+    names: string[],
+    opts?: NotebookEvalCellOpts,
+  ) => CellOutput[] | Promise<CellOutput[]>;
   syncGlobalOutput: NotebookBridge['syncGlobalOutput'];
   setSourceMode: (on: boolean) => void;
   isSourceMode: () => boolean;
@@ -172,18 +198,21 @@ export async function loadNotebookLib() {
 
 const VNB_STORAGE_KEY = 'verdict-notebook.vnb';
 
-export function loadVnbFromStorage(): { cells: NotebookCellInfo[] } | null {
+export function loadVnbFromStorage(): { cells: NotebookCellInfo[]; seedSig?: string } | null {
   try {
     const raw = localStorage.getItem(VNB_STORAGE_KEY);
     if (!raw) return null;
-    const doc = JSON.parse(raw) as { cells?: NotebookCellInfo[] };
+    const doc = JSON.parse(raw) as { cells?: NotebookCellInfo[]; seedSig?: string };
     if (!doc?.cells?.length) return null;
-    return { cells: doc.cells };
+    return { cells: doc.cells, seedSig: doc.seedSig };
   } catch {
     return null;
   }
 }
 
-export function saveVnbToStorage(doc: { cells: NotebookCellInfo[] }): void {
-  localStorage.setItem(VNB_STORAGE_KEY, JSON.stringify({ cells: doc.cells }));
+export function saveVnbToStorage(doc: { cells: NotebookCellInfo[]; seedSig?: string }): void {
+  localStorage.setItem(
+    VNB_STORAGE_KEY,
+    JSON.stringify({ cells: doc.cells, seedSig: doc.seedSig }),
+  );
 }

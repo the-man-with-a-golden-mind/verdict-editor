@@ -51,12 +51,12 @@ async function runRegression(url, browser) {
   await page.goto(`${url}/editor`, { waitUntil: "networkidle2", timeout: 90000 });
   await page.waitForSelector("verdict-editor", { timeout: 45000 });
 
-  for (const tab of ["Editor", "DB", "Visual", "Debug"]) {
+  for (const tab of ["Notebook", "DB", "Visual", "Debug"]) {
     await clickButton(page, tab);
     await delay(400);
   }
 
-  await clickButton(page, "Editor");
+  await clickButton(page, "Notebook");
   await clickButton(page, "Run");
   await page.waitForFunction(
     () => {

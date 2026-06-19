@@ -6,6 +6,11 @@ import 'monaco-editor/esm/vs/editor/contrib/suggest/browser/suggest.js';
 import 'monaco-editor/esm/vs/editor/contrib/bracketMatching/browser/bracketMatching.js';
 import 'monaco-editor/esm/vs/editor/contrib/find/browser/findController.js';
 import {
+  mergeNotebookFinvmState,
+  sourceSignature,
+  splitNotebookFinvmState,
+} from './editor/finvmSnapshot';
+import {
   createEffectStorage,
   createFinvmHandlers,
   effectDbTablesToFinvmState,
@@ -37,6 +42,8 @@ import {
   wrapVerdictLibForNotebook,
 } from './editor/notebookEval';
 import { bindingNamesInCell as resolveNotebookBindingNames } from './editor/notebookBindings';
+import { materializeIdeCellPlaceholders } from './editor/ideSession';
+import { DEFAULT_NOTEBOOK_SIM_CELL_LINES } from './editor/defaultNotebookSimCell.mjs';
 import { extractDocs, gasFromBytecode, renderCallGraph, type GasInfo } from './editor/vizGraph';
 
 declare global {
@@ -68,6 +75,16 @@ import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 
 // Shared monospace stack for every Monaco surface in the app.
 const FONT_MONO = "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
+
+function notebookSeedFromCells(cells: string[]): string {
+  const joined = cells.map((s) => s.trim()).filter(Boolean).join('\n\n');
+  let h = 5381;
+  for (let i = 0; i < joined.length; i++) h = ((h << 5) + h + joined.charCodeAt(i)) | 0;
+  return JSON.stringify({
+    seedSig: `${joined.length}:${h >>> 0}`,
+    cells: cells.map((source) => ({ source })),
+  });
+}
 
 // Base classes for the editor status bar; setStatus appends the state colour.
 const STATUS_BASE = 'flex h-7 shrink-0 items-center gap-1.5 px-4 text-xs font-mono bg-slate-950 border-t border-slate-800';
@@ -387,7 +404,10 @@ function defineVerdict() {
 }
 
 class VerdictEditorElement extends HTMLElement {
-  private activeSideTab: 'output' | 'inputs' = 'output';
+  private activeSideTab: 'output' | 'cells' | 'inputs' = 'output';
+  // The whole-program Output tab is only shown in source mode (notebook cells
+  // render their output below themselves; there is no global output panel).
+  private showOutputTab = false;
   private activeMainTab: 'editor' | 'db' | 'debug' | 'visual' = 'editor';
   private editor: monaco.editor.IStandaloneCodeEditor | null = null;
   private bytecodeEditor: monaco.editor.IStandaloneCodeEditor | null = null;
@@ -395,6 +415,8 @@ class VerdictEditorElement extends HTMLElement {
   private outputPanel!: HTMLDivElement;
   private notebookGlobalOutputHost!: HTMLDivElement;
   private programOutputHost!: HTMLDivElement;
+  private cellsPanel: HTMLDivElement | null = null;
+  private cellsNavHost: HTMLDivElement | null = null;
   private notebookBridgeRef: NotebookBridge | null = null;
   private renderNotebookDisplay:
     | ((host: HTMLElement, raw: unknown, bridge: NotebookBridge) => Promise<void>)
@@ -423,9 +445,9 @@ class VerdictEditorElement extends HTMLElement {
   private mainContainer!: HTMLDivElement;
   private leftPane: HTMLDivElement | null = null;
   private rightPane: HTMLDivElement | null = null;
+  private sourceToggleBtn: HTMLButtonElement | null = null;
   private resizeCleanup: (() => void) | null = null;
   private statusBar!: HTMLDivElement;
-  private intervalInput: HTMLInputElement | null = null;
   private symbolInput: HTMLInputElement | null = null;
   private assetsCsvInput: HTMLInputElement | null = null;
   private signalThresholdInput: HTMLInputElement | null = null;
@@ -434,10 +456,6 @@ class VerdictEditorElement extends HTMLElement {
   private telegramChatIdInput: HTMLInputElement | null = null;
   private runToggleBtn: HTMLButtonElement | null = null;
   private diagnosticsTimer: number | null = null;
-  private pollTimer: number | null = null;
-  private tickInFlight = false;
-  private liveRunning = false;
-  private liveTickCount = 0;
   private busyCount = 0;
   private finvmState: Record<string, unknown> = {};
   private effectStorage: EffectStorage | null = null;
@@ -451,6 +469,7 @@ class VerdictEditorElement extends HTMLElement {
   private built = false;
   private notebookHost: HTMLDivElement | null = null;
   private notebookApi: NotebookApi | null = null;
+  private defaultNotebookSeed = '';
   private syncingNotebook = false;
   private notebookSourceMode = false;
 
@@ -489,7 +508,7 @@ class VerdictEditorElement extends HTMLElement {
     this.container = document.createElement('div');
     this.container.className = 'flex-1 min-h-0';
 
-    // A small editor-pane header and main tabs (Editor / DB).
+    // A small editor-pane header and main tabs (Notebook / DB / Visual / Debug).
     const editorHeader = sectionHeader('Workspace', 'Main.verdict');
     const mainTabBar = document.createElement('div');
     mainTabBar.className = 'flex items-center gap-1 border-b border-slate-800 bg-slate-950 px-2 py-1.5';
@@ -501,10 +520,23 @@ class VerdictEditorElement extends HTMLElement {
       btn.onclick = () => this.setActiveMainTab(id);
       return btn;
     };
-    mainTabBar.appendChild(mkMainTabBtn('editor', 'Editor'));
+    mainTabBar.appendChild(mkMainTabBtn('editor', 'Notebook'));
     mainTabBar.appendChild(mkMainTabBtn('db', 'DB'));
     mainTabBar.appendChild(mkMainTabBtn('visual', 'Visual'));
     mainTabBar.appendChild(mkMainTabBtn('debug', 'Debug'));
+    const sourceSpacer = document.createElement('div');
+    sourceSpacer.className = 'flex-1';
+    mainTabBar.appendChild(sourceSpacer);
+    this.sourceToggleBtn = document.createElement('button');
+    this.sourceToggleBtn.type = 'button';
+    this.sourceToggleBtn.dataset.sourceToggle = '1';
+    this.sourceToggleBtn.className =
+      'rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-300 hover:border-indigo-400/50 hover:text-white';
+    this.sourceToggleBtn.textContent = 'Source';
+    this.sourceToggleBtn.onclick = () => {
+      this.notebookBridgeRef?.setSourceMode(!this.notebookSourceMode);
+    };
+    mainTabBar.appendChild(this.sourceToggleBtn);
 
     this.statusBar = document.createElement('div');
     this.statusBar.className = STATUS_BASE + ' text-slate-500';
@@ -671,17 +703,13 @@ class VerdictEditorElement extends HTMLElement {
       'inline-flex items-center rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-emerald-200 transition-colors hover:bg-emerald-500/25';
     this.runToggleBtn.textContent = 'Run';
     this.runToggleBtn.onclick = () => {
-      if (this.liveRunning) {
-        this.stopLiveLoop();
-      } else {
-        void this.startLiveLoop();
-      }
+      void this.runProgram();
     };
     startStopRow.appendChild(this.runToggleBtn);
 
     const tabBar = document.createElement('div');
     tabBar.className = 'flex items-center gap-1 border-b border-slate-800 bg-slate-950 px-2 py-1.5';
-    const mkTabBtn = (id: 'output' | 'inputs', label: string) => {
+    const mkTabBtn = (id: 'output' | 'cells' | 'inputs', label: string) => {
       const btn = document.createElement('button');
       btn.className = 'rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wider';
       btn.textContent = label;
@@ -689,20 +717,33 @@ class VerdictEditorElement extends HTMLElement {
       return btn;
     };
     const outputTabBtn = mkTabBtn('output', 'Output');
+    const cellsTabBtn = mkTabBtn('cells', 'Cells');
     const inputsTabBtn = mkTabBtn('inputs', 'Inputs');
     outputTabBtn.dataset.tabId = 'output';
+    cellsTabBtn.dataset.tabId = 'cells';
     inputsTabBtn.dataset.tabId = 'inputs';
     tabBar.appendChild(outputTabBtn);
+    tabBar.appendChild(cellsTabBtn);
     tabBar.appendChild(inputsTabBtn);
 
     this.outputPanel = document.createElement('div');
     this.outputPanel.className = 'flex flex-1 min-h-0 flex-col overflow-auto bg-[#0b0f1a]';
 
+    // Global output is removed — notebook cells render below themselves. This host
+    // is kept (hidden) only to satisfy existing references.
     this.notebookGlobalOutputHost = document.createElement('div');
     this.notebookGlobalOutputHost.dataset.notebookGlobalOutput = '1';
-    this.notebookGlobalOutputHost.className = 'notebook-global-output-side shrink-0 p-4';
-    this.notebookGlobalOutputHost.innerHTML =
-      '<div class="text-xs italic text-slate-600">Cell results routed here when a chunk uses global output (⇱).</div>';
+    this.notebookGlobalOutputHost.className = 'hidden';
+
+    // Cells tab: navigation minimap only (no output) — separate from Output.
+    this.cellsPanel = document.createElement('div');
+    this.cellsPanel.className = 'hidden flex-1 min-h-0 overflow-auto bg-[#0b0f1a] p-3';
+    this.cellsNavHost = document.createElement('div');
+    this.cellsNavHost.dataset.cellsNav = '1';
+    this.cellsNavHost.className = 'flex flex-col gap-1.5';
+    this.cellsNavHost.innerHTML =
+      '<div class="text-xs italic text-slate-600">Cells appear here for navigation and run/stop.</div>';
+    this.cellsPanel.appendChild(this.cellsNavHost);
 
     this.programOutputHost = document.createElement('div');
     this.programOutputHost.dataset.programOutput = '1';
@@ -720,7 +761,8 @@ class VerdictEditorElement extends HTMLElement {
     inputsWrap.className = 'flex h-full flex-col gap-2';
     const inputsHint = document.createElement('div');
     inputsHint.className = 'text-[11px] text-slate-400';
-    inputsHint.textContent = 'Use placeholders in code: __INPUT_key__. Values come from fields below.';
+    inputsHint.textContent =
+      'Use __INPUT_key__ placeholders. Cell boundaries live in the notebook document (.vnb), not in Verdict source.';
     const fixedInputs = document.createElement('div');
     fixedInputs.className = 'grid grid-cols-[auto,1fr] gap-x-2 gap-y-2 rounded border border-slate-800 bg-slate-950 p-2';
     const mkLabel = (text: string) => {
@@ -734,18 +776,6 @@ class VerdictEditorElement extends HTMLElement {
     this.symbolInput.value = 'BTCUSD';
     this.symbolInput.setAttribute('aria-label', 'Binance symbol');
     this.symbolInput.oninput = () => {
-      this.refreshInputsPreview();
-      this.runDiagnostics();
-      this.runInlineResults();
-    };
-    this.intervalInput = document.createElement('input');
-    this.intervalInput.type = 'number';
-    this.intervalInput.min = '1';
-    this.intervalInput.step = '1';
-    this.intervalInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
-    this.intervalInput.value = '5';
-    this.intervalInput.setAttribute('aria-label', 'Polling interval seconds');
-    this.intervalInput.oninput = () => {
       this.refreshInputsPreview();
       this.runDiagnostics();
       this.runInlineResults();
@@ -785,8 +815,6 @@ class VerdictEditorElement extends HTMLElement {
     this.telegramChatIdInput.oninput = this.assetsCsvInput.oninput;
     fixedInputs.appendChild(mkLabel('symbol'));
     fixedInputs.appendChild(this.symbolInput);
-    fixedInputs.appendChild(mkLabel('intervalSec'));
-    fixedInputs.appendChild(this.intervalInput);
     fixedInputs.appendChild(mkLabel('assetsCsv'));
     fixedInputs.appendChild(this.assetsCsvInput);
     fixedInputs.appendChild(mkLabel('signalThreshold'));
@@ -833,6 +861,7 @@ class VerdictEditorElement extends HTMLElement {
     rightPanel.appendChild(startStopRow);
     rightPanel.appendChild(tabBar);
     rightPanel.appendChild(this.outputPanel);
+    rightPanel.appendChild(this.cellsPanel);
     rightPanel.appendChild(this.inputsPanel);
 
     const resizeHandle = document.createElement('div');
@@ -864,8 +893,7 @@ class VerdictEditorElement extends HTMLElement {
       renderLineHighlight: 'none',
     });
 
-    this.editor = monaco.editor.create(this.container, {
-      value: [
+    const DEFAULT_NOTEBOOK_CELL_1 = [
         'module Main exposing (main)',
         '',
         '-- Market data: fetched from Binance in THIS code via httpGet.',
@@ -1166,31 +1194,16 @@ class VerdictEditorElement extends HTMLElement {
         '  let body = foldl(tickOneAsset, "", assets) in',
         '  if strLength(body) == 0 then "No assets to evaluate."',
         '  else strConcat("=== Verdict tick: statistical multi-asset decisions ===\\n\\n", body)',
-        '',
-        '-- %% cell: $1000 strategy simulation %%',
-        '',
-        '-- Cell 2 reads the price history cell 1 keeps appending and back-tests $1000',
-        '-- with a momentum rule: stay long after an up bar, flat otherwise. It returns',
-        '-- the equity curve (cents), which the notebook renders as a Plotly chart.',
-        '-- Run cell 1 (or enable Live) first so the history has points to simulate.',
-        'simStep : { prevPx : Int, sig : Int, eq : Int, curve : List Int } -> Int -> { prevPx : Int, sig : Int, eq : Int, curve : List Int }',
-        'simStep a px =',
-        '  if a.prevPx == 0 then { prevPx = px, sig = 0, eq = a.eq, curve = append(a.curve, a.eq) }',
-        '  else',
-        '    let ret = px - a.prevPx in',
-        '    let neweq = if a.sig > 0 then a.eq + a.eq * ret / a.prevPx else a.eq in',
-        '    let nsig = if ret > 0 then 1 else 0 in',
-        '    { prevPx = px, sig = nsig, eq = neweq, curve = append(a.curve, neweq) }',
-        '',
-        'simulate : List Int -> List Int',
-        'simulate prices =',
-        '  let r = foldl(simStep, { prevPx = 0, sig = 0, eq = 100000, curve = [] }, prices) in',
-        '  r.curve',
-        '',
-        '-- $1000 = 100000 cents, simulated over the first asset\'s fetched history.',
-        'equityCurve : List Int',
-        'equityCurve = simulate(parseCsvInts(histCsvOrEmpty("BTCUSD")))',
-      ].join('\n'),
+      ];
+    const DEFAULT_NOTEBOOK_CELL_2 = DEFAULT_NOTEBOOK_SIM_CELL_LINES;
+    const defaultNotebookCells = [
+      DEFAULT_NOTEBOOK_CELL_1.join('\n'),
+      DEFAULT_NOTEBOOK_CELL_2.join('\n'),
+    ];
+    this.defaultNotebookSeed = notebookSeedFromCells(defaultNotebookCells);
+
+    this.editor = monaco.editor.create(this.container, {
+      value: defaultNotebookCells.join('\n\n'),
       language: 'verdict',
       theme: 'verdict-dark',
       automaticLayout: true,
@@ -1228,8 +1241,12 @@ class VerdictEditorElement extends HTMLElement {
     this.refreshInputsPreview();
     this.refreshDbQueryOutput();
     this.setActiveMainTab(this.isDebugView() ? 'debug' : 'editor');
-    this.setActiveSideTab('output');
+    // Notebook view by default: Cells (navigation) tab; the whole-program Output
+    // tab only appears in source mode.
+    this.setOutputTabVisible(false);
+    this.setActiveSideTab('cells');
     await this.initNotebook();
+    this.updateWorkspaceChrome();
     this.runDiagnostics();
     this.runInlineResults();
   }
@@ -1269,7 +1286,7 @@ class VerdictEditorElement extends HTMLElement {
         materialize: (source) => this.materializeInputs(source),
         onProgramChanged: (source) => this.onNotebookProgramChanged(source),
         syncGlobalOutput: (sections) => this.syncNotebookGlobalOutput(sections),
-        evalCells: (source, names) => {
+        evalCells: (source, names, opts) => {
           if (!vlib || !finvmLib) return [];
           return evalNotebookCells(
             {
@@ -1283,14 +1300,21 @@ class VerdictEditorElement extends HTMLElement {
               setEffectStorage: (s) => {
                 this.effectStorage = s;
               },
-              materialize: (s) => this.materializeInputs(s),
+              materialize: (s, cell) =>
+                materializeIdeCellPlaceholders(this.materializeInputs(s), cell),
             },
             source,
             names,
+            opts?.cellId != null || opts?.cellIndex != null
+              ? { cell: { id: opts.cellId, index: opts.cellIndex } }
+              : undefined,
           );
         },
         setSourceMode: (on) => {
           this.notebookSourceMode = on;
+          // The Output (whole-program) tab is only relevant while editing source.
+          this.setOutputTabVisible(on);
+          this.setActiveSideTab(on ? 'output' : 'cells');
           if (!this.notebookHost || !this.container) return;
           this.notebookHost.classList.toggle('hidden', on);
           this.container.classList.toggle('hidden', !on);
@@ -1301,6 +1325,7 @@ class VerdictEditorElement extends HTMLElement {
             const src = this.editor?.getValue() ?? '';
             this.notebookApi?.setSource(src);
           }
+          this.updateWorkspaceChrome();
         },
         isSourceMode: () => this.notebookSourceMode,
         cellDiagnostics: (source, cells) => {
@@ -1330,8 +1355,9 @@ class VerdictEditorElement extends HTMLElement {
       this.notebookApi = lib.mountNotebook(
         '#verdict-notebook-host',
         bridge,
-        this.editor?.getValue() ?? '',
+        this.defaultNotebookSeed,
       );
+      this.updateWorkspaceChrome();
     } catch (e) {
       console.error('Notebook failed to load:', e);
       this.notebookHost.innerHTML =
@@ -1341,26 +1367,126 @@ class VerdictEditorElement extends HTMLElement {
     }
   }
 
+  /**
+   * Render the notebook's right-side panels. Navigation and output are SEPARATE
+   * tabs: the Cells tab is a navigation minimap (run/stop + status, no output),
+   * the Output tab shows results from cells routed to global output. Cells routed
+   * to local output render under the cell in the body instead.
+   */
   private async syncNotebookGlobalOutput(sections: GlobalOutputSection[]) {
-    if (!this.notebookGlobalOutputHost) return;
-    const renderDisplay = this.renderNotebookDisplay;
-    const bridge = this.notebookBridgeRef;
-    this.notebookGlobalOutputHost.innerHTML = '';
+    // Global output is removed — every cell renders its output below itself in
+    // the body. The right panel only hosts the Cells navigation minimap.
+    this.renderCellsNav(sections);
+  }
+
+  /** Cells tab: navigation minimap only — number, preview, run/stop, status. */
+  private renderCellsNav(sections: GlobalOutputSection[]) {
+    const host = this.cellsNavHost;
+    if (!host) return;
+    host.innerHTML = '';
     if (sections.length === 0) {
-      this.notebookGlobalOutputHost.innerHTML =
-        '<div class="text-xs italic text-slate-600">Cell results routed here when a chunk uses global output (⇱).</div>';
+      host.innerHTML = '<div class="text-xs italic text-slate-600">No cells yet.</div>';
       return;
     }
     for (const sec of sections) {
+      const isText = sec.kind === 'text';
+      const card = document.createElement('div');
+      card.dataset.navCell = sec.cellId;
+      card.className =
+        'flex items-center gap-2 rounded-lg border px-2.5 py-1.5 ' +
+        (sec.focused ? 'border-indigo-400/60 bg-indigo-500/10' : 'border-slate-800/80 bg-slate-900/40');
+
+      const navBtn = document.createElement('button');
+      navBtn.type = 'button';
+      navBtn.className = 'flex min-w-0 flex-1 flex-col gap-0.5 text-left';
+      navBtn.title = 'Jump to this cell';
+      navBtn.onclick = () => this.notebookApi?.focusCellById?.(sec.cellId);
+      const meta = document.createElement('div');
+      meta.className = 'flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500';
+      const num = document.createElement('span');
+      num.textContent = `${sec.cellIndex + 1} · ${isText ? 'Text' : 'Code'}`;
+      meta.appendChild(num);
+      const prev = document.createElement('div');
+      prev.className = 'truncate font-mono text-[11px] text-slate-300';
+      prev.textContent = sec.preview ?? '';
+      navBtn.appendChild(meta);
+      navBtn.appendChild(prev);
+      card.appendChild(navBtn);
+
+      if (!isText) {
+        const runBtn = document.createElement('button');
+        runBtn.type = 'button';
+        runBtn.dataset.runCell = sec.cellId;
+        if (sec.running) {
+          runBtn.dataset.cellState = 'running';
+          runBtn.className =
+            'shrink-0 rounded border border-rose-500/50 bg-rose-500/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-rose-200 hover:bg-rose-500/25';
+          runBtn.textContent = '■ Stop';
+          runBtn.onclick = () => this.notebookApi?.stopCellById?.(sec.cellId);
+        } else {
+          runBtn.className =
+            'shrink-0 rounded border border-emerald-500/50 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-200 hover:bg-emerald-500/25';
+          runBtn.textContent = '▶ Run';
+          runBtn.onclick = () => this.notebookApi?.runCellById?.(sec.cellId);
+        }
+        card.appendChild(runBtn);
+      }
+
+      const dot = document.createElement('span');
+      dot.className =
+        'shrink-0 text-[12px] ' +
+        (sec.running ? 'text-rose-300' : sec.hasOutput ? 'text-emerald-400/80' : 'text-slate-700');
+      dot.textContent = sec.running ? '●' : sec.hasOutput ? '●' : '○';
+      card.appendChild(dot);
+      host.appendChild(card);
+    }
+  }
+
+  /** Output tab: results from cells routed to global output only. */
+  private async renderGlobalOutput(sections: GlobalOutputSection[]) {
+    const host = this.notebookGlobalOutputHost;
+    if (!host) return;
+    const renderDisplay = this.renderNotebookDisplay;
+    const bridge = this.notebookBridgeRef;
+    // Notebook mode owns the output area; hide the whole-program output host.
+    this.programOutputHost?.classList.add('hidden');
+    host.innerHTML = '';
+    const globals = sections.filter((s) => !s.local && s.kind !== 'text');
+    if (globals.length === 0) {
+      host.innerHTML =
+        '<div class="text-xs italic text-slate-600">No global output. Cells set to local render under the cell — switch one to global to show its result here.</div>';
+      return;
+    }
+    for (const sec of globals) {
       const section = document.createElement('div');
-      section.className = 'notebook-global-section mb-3 rounded border border-slate-800/80 bg-slate-900/40 p-2';
       section.dataset.globalCellOutput = sec.cellId;
-      const head = document.createElement('div');
-      head.className = 'mb-2 text-[10px] font-bold uppercase tracking-wide text-slate-500';
-      head.textContent = `Cell ${sec.cellIndex + 1}`;
+      section.className = 'mb-3 rounded-lg border border-slate-800/80 bg-slate-900/40';
+
+      const head = document.createElement('button');
+      head.type = 'button';
+      head.className = 'flex w-full items-center gap-2 border-b border-slate-800/60 px-2.5 py-1.5 text-left';
+      head.title = 'Jump to this cell';
+      head.onclick = () => this.notebookApi?.focusCellById?.(sec.cellId);
+      const num = document.createElement('span');
+      num.className = 'shrink-0 text-[10px] font-bold uppercase tracking-wide text-slate-500';
+      num.textContent = `Cell ${sec.cellIndex + 1}`;
+      const prev = document.createElement('span');
+      prev.className = 'truncate font-mono text-[11px] text-slate-400';
+      prev.textContent = sec.preview ?? '';
+      head.appendChild(num);
+      head.appendChild(prev);
       section.appendChild(head);
+
       const content = document.createElement('div');
+      content.className = 'px-2.5 py-2';
       section.appendChild(content);
+
+      if (!sec.outputs.length && !sec.error) {
+        const empty = document.createElement('div');
+        empty.className = 'text-[11px] italic text-slate-600';
+        empty.textContent = 'Not run yet.';
+        content.appendChild(empty);
+      }
       for (const o of sec.outputs) {
         const block = document.createElement('div');
         block.className = 'mb-2';
@@ -1379,15 +1505,15 @@ class VerdictEditorElement extends HTMLElement {
         err.textContent = sec.error;
         content.appendChild(err);
       }
-      this.notebookGlobalOutputHost.appendChild(section);
+      host.appendChild(section);
     }
-    this.setActiveSideTab('output');
   }
 
-  private setActiveSideTab(tab: 'output' | 'inputs') {
+  private setActiveSideTab(tab: 'output' | 'cells' | 'inputs') {
     this.activeSideTab = tab;
-    const panels: Array<[HTMLDivElement | null, 'output' | 'inputs']> = [
+    const panels: Array<[HTMLDivElement | null, 'output' | 'cells' | 'inputs']> = [
       [this.outputPanel, 'output'],
+      [this.cellsPanel, 'cells'],
       [this.inputsPanel, 'inputs'],
     ];
     for (const [panel, id] of panels) {
@@ -1397,10 +1523,24 @@ class VerdictEditorElement extends HTMLElement {
     const tabButtons = this.mainContainer.querySelectorAll<HTMLButtonElement>('[data-tab-id]');
     tabButtons.forEach((btn) => {
       const selected = btn.dataset.tabId === tab;
-      btn.className = selected
-        ? 'rounded bg-indigo-600/30 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-indigo-200 ring-1 ring-inset ring-indigo-400/40'
-        : 'rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 hover:text-white';
+      const hidden = btn.dataset.tabId === 'output' && !this.showOutputTab;
+      btn.className =
+        (selected
+          ? 'rounded bg-indigo-600/30 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-indigo-200 ring-1 ring-inset ring-indigo-400/40'
+          : 'rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 hover:text-white') +
+        (hidden ? ' hidden' : '');
     });
+  }
+
+  /** Show/hide the whole-program Output tab (only relevant in source mode). */
+  private setOutputTabVisible(visible: boolean) {
+    this.showOutputTab = visible;
+    if (!visible && this.activeSideTab === 'output') {
+      this.setActiveSideTab('cells');
+    } else {
+      // Re-apply tab classes so the Output button's hidden state updates.
+      this.setActiveSideTab(this.activeSideTab);
+    }
   }
 
   private setActiveMainTab(tab: 'editor' | 'db' | 'debug' | 'visual') {
@@ -1427,6 +1567,7 @@ class VerdictEditorElement extends HTMLElement {
     if (tab === 'visual') {
       void this.refreshVisualization();
     }
+    this.updateWorkspaceChrome();
     const tabButtons = this.mainContainer.querySelectorAll<HTMLButtonElement>('[data-main-tab-id]');
     tabButtons.forEach((btn) => {
       const selected = btn.dataset.mainTabId === tab;
@@ -1434,6 +1575,16 @@ class VerdictEditorElement extends HTMLElement {
         ? 'rounded bg-indigo-600/30 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-indigo-200 ring-1 ring-inset ring-indigo-400/40'
         : 'rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 hover:text-white';
     });
+  }
+
+  private updateWorkspaceChrome() {
+    if (this.leftPane) {
+      this.leftPane.style.flexBasis = '72%';
+    }
+    if (this.sourceToggleBtn) {
+      this.sourceToggleBtn.textContent = this.notebookSourceMode ? 'Notebook' : 'Source';
+      this.sourceToggleBtn.classList.toggle('hidden', this.activeMainTab !== 'editor' || !this.notebookBridgeRef);
+    }
   }
 
   // The source changed; the block view is stale. Re-render only if it's the
@@ -1691,6 +1842,19 @@ class VerdictEditorElement extends HTMLElement {
 
   run() {
     if (!this.editor) return;
+    void this.runProgram();
+  }
+
+  private async runProgram() {
+    if (!this.editor) return;
+    if (
+      this.notebookApi?.runAll &&
+      this.activeMainTab === 'editor' &&
+      this.notebookApi.getViewMode?.() === 'notebook'
+    ) {
+      await this.notebookApi.runAll();
+      return;
+    }
     void this.executeProgram(false);
   }
 
@@ -1735,8 +1899,7 @@ class VerdictEditorElement extends HTMLElement {
       }
       const vmOut = await this.runFinvmProgram(compilation.output, persistState);
       if (vmOut.ok) {
-        const prefix = this.liveRunning ? `Live Tick #${this.liveTickCount}\n` : '';
-        this.renderOutput(`${prefix}${vmOut.resultText}`, 'ok');
+        this.renderOutput(vmOut.resultText, 'ok');
       } else {
         this.renderOutput(`Runtime Error: ${vmOut.error}`, 'error');
       }
@@ -1750,7 +1913,10 @@ class VerdictEditorElement extends HTMLElement {
   private renderOutput(text: string, tone: 'ok' | 'error' | 'info') {
     const color =
       tone === 'ok' ? 'text-emerald-300' : tone === 'error' ? 'text-rose-200' : 'text-indigo-300';
+    this.programOutputHost.classList.remove('hidden');
     this.programOutputHost.innerHTML = `<div class="${color} font-mono text-sm whitespace-pre-wrap break-words">${escapeHtml(text)}</div>`;
+    // Whole-program output exists — make sure the Output tab is reachable.
+    this.setOutputTabVisible(true);
     this.setActiveSideTab('output');
   }
 
@@ -2391,28 +2557,43 @@ class VerdictEditorElement extends HTMLElement {
     const finvm = finvmLib as FinVmModule;
     try {
       const program = JSON.parse(programJson);
-      const state = persistState ? this.finvmState : {};
+      const source = this.materializeInputs(this.getProgramSource());
+      const srcSig = sourceSignature(source);
+      const { userState, machineSnapshot, sourceSig: savedSig } = persistState
+        ? splitNotebookFinvmState(this.finvmState)
+        : { userState: {}, machineSnapshot: null, sourceSig: null };
+      const snapshot =
+        persistState && machineSnapshot != null && savedSig === srcSig ? machineSnapshot : undefined;
       const storage = this.effectStorage ?? createEffectStorage();
       this.effectStorage = storage;
+      const entry = typeof program.entrypoint === 'string' ? program.entrypoint : 'main';
       const vmOut = await runProgramWithEffects(finvm, JSON.stringify(program), {
-        state,
+        state: userState,
+        machineSnapshot: snapshot,
+        entryFunction: entry,
         handlers: createFinvmHandlers(storage),
       });
       if (!vmOut.ok) {
         return { ok: false, error: vmOut.error };
       }
       this.lastVmSteps = vmOut.steps;
-      // db.* effects are fulfilled host-side in the effect storage, so DB rows
-      // never appear in the VM's returned state. Surface the host db snapshot
-      // under __finvm.db so the Debug "VM DB" panel and the DB tab can read it.
       const dbState = effectDbTablesToFinvmState(storage.listDbTables());
-      this.finvmState = {
-        ...(persistState ? vmOut.state : this.finvmState),
-        '__finvm.db': dbState,
-      };
+      if (persistState) {
+        this.finvmState = mergeNotebookFinvmState({
+          userState: vmOut.state,
+          machineSnapshot: vmOut.snapshot,
+          sourceSig: srcSig,
+          dbState,
+        });
+      } else {
+        this.finvmState = {
+          ...this.finvmState,
+          '__finvm.db': dbState,
+        };
+      }
       if (this.vmStatePanel) {
         this.renderVmState({
-          status: 'completed',
+          status: vmOut.vmStatus,
           steps: vmOut.steps,
           result: vmOut.result,
           state: vmOut.state,
@@ -2443,7 +2624,6 @@ class VerdictEditorElement extends HTMLElement {
   private readRuntimeInputs(): Record<string, unknown> {
     const out: Record<string, unknown> = {
       symbol: this.currentSymbol(),
-      intervalSec: Math.floor(this.currentIntervalMs() / 1000),
       assetsCsv: this.assetsCsvInput?.value ?? 'BTCUSD,ETHUSD,ADAUSD',
       signalThreshold: Number(this.signalThresholdInput?.value ?? '2'),
       positionBias: Number(this.positionBiasInput?.value ?? '0'),
@@ -2508,11 +2688,8 @@ class VerdictEditorElement extends HTMLElement {
   private refreshInputsPreview() {
     if (!this.inputsPreview) return;
     const userInputs = this.readRuntimeInputs();
-    const intervalSec = Math.floor(this.currentIntervalMs() / 1000);
     const preview = {
-      running: this.liveRunning,
-      intervalSec,
-      tickCount: this.liveTickCount,
+      mode: this.notebookApi?.getViewMode?.() === 'notebook' ? 'notebook' : 'program',
       userInputs,
       placeholders: Object.keys(userInputs).map((k) => `__INPUT_${k}__`),
       note: 'Market data is fetched inside your Verdict code (httpGet). The editor only substitutes __INPUT_* values and runs the VM.',
@@ -2529,83 +2706,9 @@ class VerdictEditorElement extends HTMLElement {
     this.dbQueryOutput.innerHTML = `<pre class="whitespace-pre-wrap break-words">${escapeHtml(JSON.stringify(result, null, 2))}</pre>`;
   }
 
-  private currentIntervalMs(): number {
-    const v = Number(this.intervalInput?.value ?? '5');
-    const seconds = Number.isFinite(v) ? Math.max(1, Math.floor(v)) : 5;
-    return seconds * 1000;
-  }
-
   private currentSymbol(): string {
     const raw = (this.symbolInput?.value ?? 'BTCUSD').trim().toUpperCase();
     return raw === '' ? 'BTCUSD' : raw;
-  }
-
-  private updateLiveButtonState() {
-    if (this.runToggleBtn) {
-      if (this.liveRunning) {
-        this.runToggleBtn.textContent = 'Stop';
-        this.runToggleBtn.className =
-          'inline-flex items-center rounded-md border border-rose-500/40 bg-rose-500/15 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-rose-200 transition-colors hover:bg-rose-500/25';
-      } else {
-        this.runToggleBtn.textContent = 'Run';
-        this.runToggleBtn.className =
-          'inline-flex items-center rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-emerald-200 transition-colors hover:bg-emerald-500/25';
-      }
-    }
-    this.refreshInputsPreview();
-  }
-
-  private async runLiveTick() {
-    if (this.tickInFlight || !this.editor) return;
-    this.tickInFlight = true;
-    this.liveTickCount += 1;
-    try {
-      // In notebook view, drive the cells (cell 1 fetches+appends history once,
-      // cell 2 re-simulates) instead of the whole-program run — same shared VM.
-      if (
-        this.notebookApi?.runAll &&
-        this.activeMainTab === 'editor' &&
-        this.notebookApi.getViewMode?.() === 'notebook'
-      ) {
-        await this.notebookApi.runAll();
-      } else {
-        await this.executeProgram(true);
-      }
-    } finally {
-      this.tickInFlight = false;
-    }
-  }
-
-  private async startLiveLoop() {
-    if (this.liveRunning || !this.editor) return;
-    if (!vlib || !finvmLib) {
-      this.renderOutput('Compiler/VM still loading… try again in a moment.', 'error');
-      return;
-    }
-    this.liveRunning = true;
-    this.liveTickCount = 0;
-    this.finvmState = {};
-    this.effectStorage = createEffectStorage();
-    this.lastVmSteps = 0;
-    this.vmMetricsHistory = [];
-    this.updateLiveButtonState();
-    this.refreshDbQueryOutput();
-    this.renderOutput('Live loop started… running your Verdict strategy on each tick.', 'info');
-    await this.runLiveTick();
-    const intervalMs = this.currentIntervalMs();
-    this.pollTimer = window.setInterval(() => {
-      void this.runLiveTick();
-    }, intervalMs);
-  }
-
-  private stopLiveLoop() {
-    this.liveRunning = false;
-    if (this.pollTimer !== null) {
-      window.clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
-    this.updateLiveButtonState();
-    this.renderOutput('Live loop stopped.', 'info');
   }
 
   disconnectedCallback() {
@@ -2613,7 +2716,6 @@ class VerdictEditorElement extends HTMLElement {
       window.clearTimeout(this.diagnosticsTimer);
       this.diagnosticsTimer = null;
     }
-    this.stopLiveLoop();
     this.resizeCleanup?.();
     this.resizeCleanup = null;
     this.editor?.dispose();

@@ -34,7 +34,7 @@ function makeBindingHelpers(bridge) {
   return { bindingNamesForCell, isDefinitionOnlyCell };
 }
 
-let liveMonaco = null;
+let cellMonaco = null;
 
 async function colorize(code, bridge) {
   return colorizeImpl(code)(bridge)();
@@ -54,7 +54,11 @@ function escapeHtml(s) {
 function defaultCellUi() {
   return {
     folded: false,
+    codeFolded: false,
     outputFolded: false,
+    // Jupyter model: output renders LOCALLY under the cell by default. A cell can
+    // opt in to GLOBAL output (the shared right-side Output panel) with the
+    // cell ⋯ menu (output routing is editor UI only, not source directives).
     outputTarget: "inline",
     editorHeight: 160,
     outputHeight: 180,
@@ -66,8 +70,18 @@ function ensureUi(cell) {
   return cell.ui;
 }
 
+// Stable signature of the seed source. Persisted with the document so a changed
+// default program re-seeds instead of being permanently shadowed by an old save.
+function seedSignature(src) {
+  let h = 5381;
+  const s = String(src || "");
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return `${s.length}:${h >>> 0}`;
+}
+
 function persist(state, bridge) {
   bridge.saveDocument?.({
+    seedSig: state.seedSig,
     cells: state.cells.map((c) => ({
       id: c.id,
       kind: c.kind,
@@ -174,6 +188,9 @@ export function mountNotebookImpl(selector) {
           maximizedCellId: null,
           running: new Set(),
           runControllers: {},
+          executionCounts: {},
+          executionSeq: 0,
+          clipboardCell: null,
         };
 
         let seq = 0;
@@ -184,8 +201,105 @@ export function mountNotebookImpl(selector) {
             id: c.id || newId(),
             kind: c.kind === "wysiwyg" ? "wysiwyg" : "code",
             source: c.source ?? "",
-            ui: c.ui ? { ...defaultCellUi(), ...c.ui } : defaultCellUi(),
+            ui: { ...defaultCellUi(), ...c.ui },
           };
+        }
+
+        function cellsFromSources(sources) {
+          return sources.map((s) => ({
+            id: newId(),
+            kind: "code",
+            source: s,
+            ui: defaultCellUi(),
+          }));
+        }
+
+        /** JSON `{ seedSig, cells: [{ source }] }` or legacy single source string. */
+        function parseInitialSeed(initial) {
+          const text = String(initial || "");
+          if (text.startsWith("{")) {
+            try {
+              const doc = JSON.parse(text);
+              if (doc?.cells?.length) {
+                const joined = doc.cells
+                  .map((c) => String(c.source ?? "").trim())
+                  .filter(Boolean)
+                  .join("\n\n");
+                return {
+                  seedSig: doc.seedSig ?? seedSignature(joined),
+                  cells: doc.cells.map((c) => mapLoadedCell(c)),
+                };
+              }
+            } catch {
+              /* fall through */
+            }
+          }
+          const trimmed = text.trim();
+          const sources = trimmed ? [trimmed] : [""];
+          return {
+            seedSig: seedSignature(trimmed),
+            cells: cellsFromSources(sources),
+          };
+        }
+
+        function initFromSeed(initial) {
+          const seeded = parseInitialSeed(initial);
+          state.seedSig = seeded.seedSig;
+          const saved = bridge.loadDocument?.();
+          if (saved?.cells?.length && saved.seedSig === seeded.seedSig && saved.cells.length === seeded.cells.length) {
+            state.cells = saved.cells.map(mapLoadedCell);
+          } else {
+            state.cells = seeded.cells;
+            persist(state, bridge);
+          }
+          publishSource();
+        }
+
+        initFromSeed(initialSource || "");
+
+        const defaultSeed = parseInitialSeed(initialSource || "");
+
+        function applyEvalResults(outs, upToIdx, focusCellId) {
+          const focusCell = state.cells[upToIdx];
+          const focusNames = focusCell ? bindingNamesForRun(focusCell) : [];
+          let matchedCurrent = false;
+          for (const o of outs) {
+            for (let i = 0; i <= upToIdx; i++) {
+              const c = state.cells[i];
+              if (c.kind !== "code") continue;
+              if (!bindingNamesForRun(c).includes(o.name)) continue;
+              state.outputs[`${c.id}:${o.name}`] = o;
+              state.errors[c.id] = o.ok ? "" : o.error || "";
+              if (c.id === focusCellId) matchedCurrent = true;
+              break;
+            }
+          }
+          if (focusNames.length > 0 && !matchedCurrent) {
+            const errOut = outs.find((o) => focusNames.includes(o.name));
+            if (errOut && focusCell) {
+              state.outputs[`${focusCell.id}:${errOut.name}`] = errOut;
+              state.errors[focusCell.id] = errOut.error || "";
+            }
+          }
+        }
+
+        async function evalCellOutputs(cell, cellIdx, signal) {
+          const cellNames = bindingNamesForRun(cell);
+          const src = getBridgeSource();
+          const chk = bridge.compile?.(src);
+          if (chk && !chk.ok) {
+            throw new Error(chk.error ?? "Compile failed");
+          }
+          const prefixNames = [];
+          for (let i = 0; i <= cellIdx; i++) {
+            const c = state.cells[i];
+            if (c.kind === "code") prefixNames.push(...bindingNamesForRun(c));
+          }
+          const names = [...new Set(prefixNames.length ? prefixNames : cellNames)];
+          if (names.length === 0) return [];
+          return await Promise.resolve(
+            bridge.evalCells?.(src, names, { signal, cellId: cell.id, cellIndex: cellIdx }) ?? [],
+          );
         }
 
         function concatenate() {
@@ -224,30 +338,6 @@ export function mountNotebookImpl(selector) {
           state.cellDiags = bridge.cellDiagnostics?.(src, cells) ?? {};
         }
 
-        // A `-- %% ... %%` comment line marks a cell boundary in seed source, so a
-        // single default program can seed as several cells. It is a valid Verdict
-        // comment, so Source mode still compiles the whole thing.
-        function splitSeedCells(src) {
-          const parts = String(src || "")
-            .split(/\n--\s*%%[^\n]*%%[^\n]*\n/)
-            .map((s) => s.trim())
-            .filter(Boolean);
-          const sources = parts.length ? parts : [src || ""];
-          return sources.map((s) => ({ id: newId(), kind: "code", source: s, ui: defaultCellUi() }));
-        }
-
-        function initFromSource(src) {
-          const saved = bridge.loadDocument?.();
-          if (saved?.cells?.length) {
-            state.cells = saved.cells.map(mapLoadedCell);
-          } else {
-            state.cells = splitSeedCells(src);
-          }
-          publishSource();
-        }
-
-        initFromSource(initialSource || "");
-
         const api = {
           notebookSource: () => concatenate(),
           notebookDocumentSource: () => concatenateDocument(),
@@ -258,6 +348,23 @@ export function mountNotebookImpl(selector) {
           },
           getViewMode: () => (bridge.isSourceMode?.() ? "source" : "notebook"),
           runAll: () => runAll(),
+          // Driven from the merged Cells panel in the editor shell.
+          runCellById: (id) => {
+            const i = state.cells.findIndex((c) => c.id === id);
+            if (i >= 0) return runCell(state.cells[i], i);
+          },
+          stopCellById: (id) => {
+            const c = state.cells.find((c) => c.id === id);
+            if (c) stopCell(c);
+          },
+          focusCellById: (id) => {
+            state.focusedId = id;
+            void render().then(() => {
+              stack
+                .querySelector(`[data-cell-id="${id}"]`)
+                ?.scrollIntoView({ behavior: "smooth", block: "center" });
+            });
+          },
         };
 
         const root = document.createElement("div");
@@ -268,21 +375,49 @@ export function mountNotebookImpl(selector) {
         toolbar.className =
           "notebook-toolbar flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-800 bg-slate-950 px-3 py-2";
 
-        const mkBtn = (label, extra) => {
+        const mkBtn = (label, extra, title) => {
           const b = document.createElement("button");
           b.type = "button";
           b.className =
-            "rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-slate-300 hover:border-indigo-400/50 hover:text-white " +
+            "rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-slate-300 hover:border-indigo-400/50 hover:text-white " +
             (extra ?? "");
           b.textContent = label;
+          if (title) b.title = title;
           return b;
         };
 
-        const addCodeBtn = mkBtn("+ Code", "");
-        const addTextBtn = mkBtn("+ Text", "");
-        const runAllBtn = mkBtn("Run all", "border-emerald-500/40 text-emerald-200");
-        const openVerdictBtn = mkBtn("Open .verdict", "");
-        const saveVnbBtn = mkBtn("Save .vnb", "border-slate-600");
+        const saveVnbBtn = mkBtn("Save", "border-slate-600", "Save notebook as .vnb");
+        const addCodeBtn = mkBtn("+ Code", "", "Insert a code cell");
+        const addTextBtn = mkBtn("+ Text", "", "Insert a text cell");
+        const cutBtn = mkBtn("Cut", "", "Cut selected cell");
+        const copyBtn = mkBtn("Copy", "", "Copy selected cell");
+        const pasteBtn = mkBtn("Paste", "", "Paste copied cell below selected cell");
+        const runBtn = mkBtn("Run", "border-emerald-500/40 text-emerald-200", "Run selected cell");
+        const stopBtn = mkBtn("Stop", "border-rose-500/40 text-rose-200", "Stop selected cell");
+        const runAllBtn = mkBtn("Run all", "border-emerald-500/40 text-emerald-200", "Run every code cell once");
+        const sourceBtn = mkBtn("Source", "", "Open the concatenated Verdict source");
+        const openVerdictBtn = mkBtn("Open", "", "Open .verdict or .vnb");
+        const resetBtn = mkBtn("Reset", "border-rose-500/40 text-rose-200", "Reset to default example");
+
+        // Re-seed from the default program, discarding any saved notebook. Escapes
+        // stale `.vnb` state from older layouts.
+        resetBtn.onclick = () => {
+          if (!confirm("Reset the notebook to the default example? This discards your current cells.")) return;
+          state.cells = defaultSeed.cells.map((c) => ({
+            ...c,
+            id: newId(),
+            ui: { ...defaultCellUi(), ...c.ui },
+          }));
+          state.seedSig = defaultSeed.seedSig;
+          state.focusedId = state.cells[0] ? state.cells[0].id : null;
+          state.outputs = {};
+          state.errors = {};
+          state.running = new Set();
+          state.runControllers = {};
+          persist(state, bridge);
+          publishSource();
+          render();
+        };
 
         function downloadVnb() {
           const doc = {
@@ -331,15 +466,23 @@ export function mountNotebookImpl(selector) {
           render();
         };
 
+        toolbar.appendChild(saveVnbBtn);
         toolbar.appendChild(addCodeBtn);
         toolbar.appendChild(addTextBtn);
+        toolbar.appendChild(cutBtn);
+        toolbar.appendChild(copyBtn);
+        toolbar.appendChild(pasteBtn);
+        toolbar.appendChild(runBtn);
+        toolbar.appendChild(stopBtn);
         toolbar.appendChild(runAllBtn);
+        toolbar.appendChild(sourceBtn);
         toolbar.appendChild(openVerdictBtn);
-        toolbar.appendChild(saveVnbBtn);
+        toolbar.appendChild(resetBtn);
         toolbar.appendChild(fileInput);
 
         openVerdictBtn.onclick = () => fileInput.click();
         saveVnbBtn.onclick = () => downloadVnb();
+        sourceBtn.onclick = () => bridge.setSourceMode?.(true);
 
         const bodyWrap = document.createElement("div");
         bodyWrap.className = "flex min-h-0 flex-1 flex-row";
@@ -348,9 +491,10 @@ export function mountNotebookImpl(selector) {
         stack.className = "notebook-stack-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-3 py-3 flex flex-col gap-3";
         stack.dataset.notebookStack = "1";
 
-        // Right-side cell navigator (PowerPoint-style page strip).
+        // Cell navigation now lives in the editor's right-side panel (merged with
+        // output + run). This inline rail is kept hidden for backward compatibility.
         const nav = document.createElement("div");
-        nav.className = "notebook-nav hidden w-44 shrink-0 flex-col gap-1.5 overflow-y-auto border-l border-slate-800 bg-slate-950/70 p-2 lg:flex";
+        nav.className = "notebook-nav hidden";
         nav.dataset.notebookNav = "1";
 
         bodyWrap.appendChild(stack);
@@ -382,53 +526,23 @@ export function mountNotebookImpl(selector) {
           state.running.add(cell.id);
           const ui = ensureUi(cell);
           ui.outputFolded = false;
-          await render(); // reflect running state (Run → Stop)
-          const cellNames = bindingNamesForRun(cell);
-          const src = getBridgeSource();
+          await render();
           try {
-            const chk = bridge.compile?.(src);
-            if (chk && !chk.ok) {
-              state.errors[cell.id] = chk.error ?? "Compile failed";
-              return;
-            }
-            const prefixNames = [];
-            for (let i = 0; i <= cellIdx; i++) {
-              const c = state.cells[i];
-              if (c.kind === "code") prefixNames.push(...bindingNamesForRun(c));
-            }
-            const names = [...new Set(prefixNames.length ? prefixNames : cellNames)];
-            if (names.length === 0) {
+            const cellNames = bindingNamesForRun(cell);
+            if (cellNames.length === 0) {
               state.errors[cell.id] = "";
               return;
             }
-            const outs = await Promise.resolve(bridge.evalCells?.(src, names, controller.signal) ?? []);
+            const outs = await evalCellOutputs(cell, cellIdx, controller.signal);
             if (controller.signal.aborted) return;
-            let matchedCurrent = false;
-            for (const o of outs) {
-              for (let i = 0; i <= cellIdx; i++) {
-                const c = state.cells[i];
-                if (c.kind !== "code") continue;
-                if (!bindingNamesForRun(c).includes(o.name)) continue;
-                state.outputs[`${c.id}:${o.name}`] = o;
-                state.errors[c.id] = o.ok ? "" : o.error || "";
-                if (c.id === cell.id) matchedCurrent = true;
-                break;
-              }
-            }
-            if (cellNames.length > 0 && !matchedCurrent) {
-              const errOut = outs.find((o) => cellNames.includes(o.name));
-              if (errOut) {
-                state.outputs[`${cell.id}:${errOut.name}`] = errOut;
-                state.errors[cell.id] = errOut.error || "";
-              } else {
-                state.errors[cell.id] = "";
-              }
-            } else if (cellNames.length === 0) {
-              state.errors[cell.id] = "";
-            }
+            applyEvalResults(outs, cellIdx, cell.id);
           } catch (e) {
             if (!controller.signal.aborted) state.errors[cell.id] = String(e);
           } finally {
+            if (!controller.signal.aborted) {
+              state.executionSeq += 1;
+              state.executionCounts[cell.id] = state.executionSeq;
+            }
             state.running.delete(cell.id);
             delete state.runControllers[cell.id];
             await render();
@@ -514,6 +628,20 @@ export function mountNotebookImpl(selector) {
           render();
         }
 
+        function selectedIndex() {
+          const i = state.cells.findIndex((c) => c.id === state.focusedId);
+          return i >= 0 ? i : 0;
+        }
+
+        function cloneCellForPaste(cell) {
+          return {
+            id: newId(),
+            kind: cell.kind === "wysiwyg" ? "wysiwyg" : "code",
+            source: cell.source ?? "",
+            ui: cell.ui ? { ...defaultCellUi(), ...cell.ui } : defaultCellUi(),
+          };
+        }
+
         function deleteCellAt(idx) {
           const cell = state.cells[idx];
           if (!cell) return;
@@ -540,10 +668,10 @@ export function mountNotebookImpl(selector) {
           render();
         }
 
-        function destroyLiveMonaco() {
-          if (liveMonaco) {
-            disposeEditorImpl(liveMonaco)();
-            liveMonaco = null;
+        function destroyCellMonaco() {
+          if (cellMonaco) {
+            disposeEditorImpl(cellMonaco)();
+            cellMonaco = null;
           }
         }
 
@@ -572,23 +700,31 @@ export function mountNotebookImpl(selector) {
           return hasContent;
         }
 
-        async function refreshGlobalOutputPanel() {
+        // Publish one section per cell (navigation + run state + output) to the
+        // editor's right-side panel, where the merged Cells view renders them.
+        async function publishPanel() {
           const sections = [];
           for (let i = 0; i < state.cells.length; i++) {
             const cell = state.cells[i];
             const ui = ensureUi(cell);
-            if (ui.outputTarget !== "global") continue;
+            const local = ui.outputTarget !== "global";
             const names = bindingNamesForRun(cell);
-            const outputs = names
+            const allOutputs = names
               .map((n) => state.outputs[`${cell.id}:${n}`])
               .filter(Boolean);
-            const hasOutputs = outputs.length > 0 || state.errors[cell.id];
-            if (!hasOutputs) continue;
             sections.push({
               cellIndex: i,
               cellId: cell.id,
-              outputs,
-              error: state.errors[cell.id] || undefined,
+              kind: cell.kind === "wysiwyg" ? "text" : "code",
+              preview: await getCellPreviewLine(cell),
+              running: state.running.has(cell.id),
+              focused: state.focusedId === cell.id,
+              hasOutput: allOutputs.length > 0 || Boolean(state.errors[cell.id]),
+              // Inline cells render output in the body; the panel only shows their
+              // nav + run controls (no duplicated output).
+              local,
+              outputs: local ? [] : allOutputs,
+              error: local ? undefined : state.errors[cell.id] || undefined,
             });
           }
           await Promise.resolve(bridge.syncGlobalOutput?.(sections));
@@ -643,20 +779,8 @@ export function mountNotebookImpl(selector) {
             menu.appendChild(d);
           };
 
-          item(ui.folded ? "Expand cell" : "Fold cell", () => {
-            ui.folded = !ui.folded;
-            render();
-          });
+          // Fold and Hide-output are gutter icons (see appendCellGutterControls).
           if (isCodeCell && idx > 0) item("Run above", () => void runAbove(idx));
-          item(ui.outputTarget === "inline" ? "Send output to panel" : "Show output inline", () => {
-            ui.outputTarget = ui.outputTarget === "inline" ? "global" : "inline";
-            render();
-          });
-          if (isCodeCell && ui.outputTarget === "inline" && !ui.folded)
-            item(ui.outputFolded ? "Show output" : "Hide output", () => {
-              ui.outputFolded = !ui.outputFolded;
-              render();
-            });
           item(isMax ? "Minimize" : "Maximize", () => {
             state.maximizedCellId = isMax ? null : cell.id;
             if (isMax) state.focusedId = cell.id;
@@ -676,12 +800,60 @@ export function mountNotebookImpl(selector) {
 
         function appendCellGutterControls(gutter, cell, idx, ui, isCodeCell, isMax) {
           const num = document.createElement("span");
-          num.className = "text-[10px] font-mono text-slate-500";
-          num.textContent = String(idx + 1);
+          num.className = "whitespace-nowrap text-[10px] font-mono text-slate-500";
+          const executionCount = state.executionCounts[cell.id];
+          num.textContent = isCodeCell ? `In [${executionCount ?? " "}]:` : `[${idx + 1}]`;
           gutter.appendChild(num);
 
           if (isCodeCell)
-            gutter.appendChild(mkGutterRunBtn(cell, idx, runCell, stopCell, state.running.has(cell.id)));
+            gutter.appendChild(
+              mkGutterRunBtn(cell, idx, runCell, stopCell, state.running.has(cell.id)),
+            );
+
+          const activeClass = "border-indigo-400/60 bg-indigo-500/10 text-indigo-200";
+
+          // Fold ALL (code + output) — collapse the cell to its preview line.
+          const foldBtn = mkGutterBtn(
+            ui.folded ? "Expand cell" : "Fold all (code + output)",
+            ui.folded ? "▸" : "▾",
+            ui.folded ? activeClass : "",
+            { key: "foldCell", value: cell.id },
+          );
+          foldBtn.onclick = () => {
+            ui.folded = !ui.folded;
+            if (!ui.folded && cell.kind === "code") state.focusedId = cell.id;
+            render();
+          };
+          gutter.appendChild(foldBtn);
+
+          if (isCodeCell && !ui.folded) {
+            // Fold just the CODE (keep output visible).
+            const codeBtn = mkGutterBtn(
+              ui.codeFolded ? "Show code" : "Fold code",
+              "{}",
+              ui.codeFolded ? activeClass : "",
+              { key: "codeToggle", value: cell.id },
+            );
+            codeBtn.onclick = () => {
+              ui.codeFolded = !ui.codeFolded;
+              render();
+            };
+            gutter.appendChild(codeBtn);
+
+            // Fold just the OUTPUT (keep code visible).
+            const outBtn = mkGutterBtn(
+              ui.outputFolded ? "Show output" : "Fold output",
+              ui.outputFolded ? "▢" : "▣",
+              ui.outputFolded ? activeClass : "",
+              { key: "outputToggle", value: cell.id },
+            );
+            outBtn.onclick = () => {
+              ui.outputFolded = !ui.outputFolded;
+              render();
+            };
+            gutter.appendChild(outBtn);
+          }
+
           gutter.appendChild(buildCellMenu(cell, idx, ui, isCodeCell, isMax));
         }
 
@@ -693,7 +865,7 @@ export function mountNotebookImpl(selector) {
 
           const gutter = document.createElement("div");
           gutter.className =
-            "notebook-cell-gutter notebook-cell-gutter--folded flex shrink-0 flex-row flex-wrap items-center content-start gap-1 self-start border-r border-slate-800 bg-slate-950 px-1.5 py-1 w-[4.5rem]";
+            "notebook-cell-gutter notebook-cell-gutter--folded flex w-24 shrink-0 flex-row flex-wrap items-center content-start gap-1 self-start border-r border-slate-800 bg-slate-950 px-1.5 py-1";
           appendCellGutterControls(gutter, cell, idx, ui, isCodeCell, isMax, { compact: true });
 
           const body = document.createElement("div");
@@ -714,21 +886,7 @@ export function mountNotebookImpl(selector) {
           previewRow.appendChild(preview);
           body.appendChild(previewRow);
 
-          const hasOut = cellHasOutput(cell);
-          if (ui.outputTarget === "global" && hasOut) {
-            const hint = document.createElement("div");
-            hint.className =
-              "truncate border-t border-slate-800/60 px-2 py-1 text-[10px] italic text-slate-500";
-            hint.textContent = "Output in Output panel ⇱";
-            body.appendChild(hint);
-          } else if (ui.outputTarget === "inline" && hasOut) {
-            const outHost = document.createElement("div");
-            outHost.className =
-              "notebook-output notebook-output--folded border-t border-slate-800/80 px-2 py-1 overflow-auto max-h-32 text-xs";
-            outHost.dataset.cellOutput = cell.id;
-            await fillOutputHost(outHost, cell, idx);
-            body.appendChild(outHost);
-          }
+          // A folded cell collapses to just its preview line — no output shown.
 
           row.appendChild(gutter);
           row.appendChild(body);
@@ -742,8 +900,14 @@ export function mountNotebookImpl(selector) {
           const isCodeCell = cell.kind === "code";
 
           const wrap = document.createElement("div");
-          wrap.className = "notebook-cell rounded-lg border border-slate-800 bg-slate-950/60 overflow-hidden";
+          // shrink-0 so cells keep their height and the stack scrolls (Jupyter-style)
+          // instead of compressing every cell to fit the viewport.
+          const focused = state.focusedId === cell.id;
+          wrap.className =
+            "notebook-cell shrink-0 rounded-md border bg-slate-950/60 overflow-hidden " +
+            (focused ? "border-indigo-400/70" : "border-slate-800");
           wrap.dataset.cellId = cell.id;
+          wrap.dataset.cellFocused = focused ? "1" : "0";
           if (isMax) wrap.classList.add("notebook-cell--maximized");
 
           if (ui.folded && !isMax) {
@@ -756,41 +920,91 @@ export function mountNotebookImpl(selector) {
 
           const gutter = document.createElement("div");
           gutter.className =
-            "notebook-cell-gutter flex w-12 shrink-0 flex-col items-center gap-1.5 border-r border-slate-800 bg-slate-950 py-2";
+            "notebook-cell-gutter flex w-20 shrink-0 flex-col items-center gap-1.5 border-r border-slate-800 bg-slate-950 py-2";
           appendCellGutterControls(gutter, cell, idx, ui, isCodeCell, isMax);
 
           const body = document.createElement("div");
           body.className = "flex min-w-0 flex-1 flex-col min-h-0";
 
+          const cellHead = document.createElement("div");
+          cellHead.className =
+            "flex min-h-[2rem] items-center justify-between border-b border-slate-800/70 px-3 py-1";
+          const cellTitle = document.createElement("button");
+          cellTitle.type = "button";
+          cellTitle.className = "min-w-0 truncate text-left font-mono text-[11px] text-slate-400 hover:text-slate-200";
+          cellTitle.textContent = await getCellPreviewLine(cell);
+          cellTitle.onclick = () => {
+            state.focusedId = cell.id;
+            render();
+          };
+          const cellKind = document.createElement("span");
+          cellKind.className =
+            "ml-3 shrink-0 rounded border border-slate-700 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-500";
+          cellKind.textContent = cell.kind === "wysiwyg" ? "Markdown" : "Code";
+          cellHead.appendChild(cellTitle);
+          cellHead.appendChild(cellKind);
+          body.appendChild(cellHead);
+
+          if (ui.codeFolded && cell.kind === "code") {
+            const bar = document.createElement("div");
+            bar.className =
+              "flex cursor-pointer items-center gap-2 px-3 py-1.5 text-[11px] italic text-slate-500 hover:text-slate-300";
+            bar.textContent = "⟨ code hidden — click to show ⟩";
+            bar.onclick = () => {
+              ui.codeFolded = false;
+              render();
+            };
+            body.appendChild(bar);
+          } else {
           const editorSection = document.createElement("div");
           editorSection.className = "notebook-cell-editor-section relative flex flex-col min-h-0";
 
+          // Jupyter-style: the editor sizes to its content (no fixed-height box),
+          // growing with line count up to a cap, then scrolling.
+          const lineCount = Math.max((cell.source || "").split("\n").length, 1);
+          const lineH = 19;
+          const maxEditorH = isMax ? 900 : 560;
+          const contentEditorH = Math.min(Math.max(lineCount * lineH + 20, 48), maxEditorH);
+
           const editorHost = document.createElement("div");
-          editorHost.className = "notebook-cell-editor font-mono text-xs overflow-hidden";
-          editorHost.style.height = `${editorH}px`;
-          editorHost.style.minHeight = "72px";
+          editorHost.className = "notebook-cell-editor font-mono text-xs";
+          editorHost.style.height = `${contentEditorH}px`;
 
           const monacoEditor = getMonacoEditor(bridge);
 
           if (cell.kind === "wysiwyg") {
+            editorHost.style.height = "auto";
             mountWysiwyg(editorHost, cell.source, (md) => {
               cell.source = md;
               persist(state, bridge);
             });
           } else if (state.focusedId === cell.id && !bridge.isSourceMode?.() && monacoEditor?.create) {
-            destroyLiveMonaco();
-            liveMonaco = createEditorImpl(editorHost)(cell.source)(bridge)();
-            if (liveMonaco?.onDidChangeModelContent) {
-              liveMonaco.onDidChangeModelContent(() => {
-                cell.source = liveMonaco.getValue();
+            destroyCellMonaco();
+            cellMonaco = createEditorImpl(editorHost)(cell.source)(bridge)();
+            // Grow/shrink the editor to fit its content as the user types.
+            const fitMonaco = () => {
+              if (!cellMonaco?.getContentHeight) return;
+              const h = Math.min(Math.max(cellMonaco.getContentHeight(), 48), maxEditorH);
+              editorHost.style.height = `${h}px`;
+              cellMonaco.layout?.();
+            };
+            if (cellMonaco?.onDidChangeModelContent) {
+              cellMonaco.onDidChangeModelContent(() => {
+                cell.source = cellMonaco.getValue();
+                fitMonaco();
                 publishSource();
               });
             }
-            liveMonaco?.layout?.();
-            liveMonaco?.focus?.();
+            if (cellMonaco?.onDidContentSizeChange) cellMonaco.onDidContentSizeChange(fitMonaco);
+            cellMonaco?.layout?.();
+            fitMonaco();
+            cellMonaco?.focus?.();
           } else if (cell.kind === "code") {
+            editorHost.style.height = "auto";
+            editorHost.style.maxHeight = isMax ? "none" : `${maxEditorH}px`;
+            editorHost.style.overflowY = "auto";
             const pre = document.createElement("div");
-            pre.className = "cursor-text h-full overflow-auto px-3 py-2 text-slate-200";
+            pre.className = "cursor-text px-3 py-2 text-slate-200";
             pre.dataset.staticCode = "1";
             pre.onclick = () => {
               state.focusedId = cell.id;
@@ -802,22 +1016,10 @@ export function mountNotebookImpl(selector) {
 
           editorSection.appendChild(editorHost);
 
-          const editorResize = document.createElement("div");
-          editorResize.className = "notebook-cell-editor-resizer";
-          editorResize.title = "Drag to resize editor";
-          editorSection.appendChild(editorResize);
-          installVerticalResize(
-            editorResize,
-            () => ui.editorHeight,
-            (h) => {
-              ui.editorHeight = h;
-              editorHost.style.height = `${h}px`;
-              liveMonaco?.layout?.();
-            },
-            { min: 72, max: isMax ? 900 : 640 },
-          );
+          // No manual editor resize handle — the editor auto-fits its content.
 
           body.appendChild(editorSection);
+          }
 
           const diagHost = document.createElement("div");
           diagHost.className = "px-3 py-1";
@@ -831,45 +1033,13 @@ export function mountNotebookImpl(selector) {
           }
           if (diags.length) body.appendChild(diagHost);
 
-          const outHost = document.createElement("div");
-          outHost.className = "notebook-output border-t border-slate-800 px-3 py-2 overflow-auto";
-          outHost.dataset.cellOutput = cell.id;
-
-          if (ui.outputTarget === "global") {
-            const hint = document.createElement("div");
-            hint.className =
-              "border-t border-slate-800/60 px-3 py-1.5 text-[10px] italic text-slate-600 notebook-output-routed-global";
-            hint.textContent = "Output routed to Output panel on the right ⇱";
-            body.appendChild(hint);
-          } else {
-            if (ui.outputFolded) {
-              outHost.classList.add("hidden");
-            } else {
-              outHost.style.maxHeight = `${ui.outputHeight}px`;
-              await fillOutputHost(outHost, cell, idx);
-            }
-
-            const outputSection = document.createElement("div");
-            outputSection.className = "notebook-cell-output-section relative flex flex-col min-h-0";
-            outputSection.appendChild(outHost);
-
-            if (!ui.outputFolded) {
-              const outputResize = document.createElement("div");
-              outputResize.className = "notebook-cell-output-resizer";
-              outputResize.title = "Drag to resize output";
-              outputSection.appendChild(outputResize);
-              installVerticalResize(
-                outputResize,
-                () => ui.outputHeight,
-                (h) => {
-                  ui.outputHeight = h;
-                  outHost.style.maxHeight = `${h}px`;
-                },
-                { min: 48, max: 480 },
-              );
-            }
-
-            body.appendChild(outputSection);
+          if (!ui.outputFolded) {
+            const outHost = document.createElement("div");
+            outHost.className = "notebook-output border-t border-slate-800 px-3 py-2 overflow-auto";
+            outHost.dataset.cellOutput = cell.id;
+            outHost.style.maxHeight = isMax ? "none" : "600px";
+            await fillOutputHost(outHost, cell, idx);
+            body.appendChild(outHost);
           }
 
           row.appendChild(gutter);
@@ -882,14 +1052,14 @@ export function mountNotebookImpl(selector) {
           const sourceMode = bridge.isSourceMode?.();
           bodyWrap.classList.toggle("hidden", !!sourceMode);
           if (sourceMode) {
-            destroyLiveMonaco();
+            destroyCellMonaco();
             return;
           }
 
           const maximized = state.maximizedCellId;
           toolbar.classList.toggle("hidden", !!maximized);
 
-          destroyLiveMonaco();
+          destroyCellMonaco();
           stack.innerHTML = "";
           stack.classList.toggle("notebook-stack--maximized", !!maximized);
           updateCellDiagnostics();
@@ -909,8 +1079,7 @@ export function mountNotebookImpl(selector) {
             }
           }
 
-          await refreshGlobalOutputPanel();
-          await buildNav();
+          await publishPanel();
         }
 
         addCodeBtn.onclick = () => {
@@ -924,6 +1093,41 @@ export function mountNotebookImpl(selector) {
           state.cells.push({ id: newId(), kind: "wysiwyg", source: "", ui: defaultCellUi() });
           persist(state, bridge);
           render();
+        };
+
+        cutBtn.onclick = () => {
+          const idx = selectedIndex();
+          const cell = state.cells[idx];
+          if (!cell) return;
+          state.clipboardCell = cloneCellForPaste(cell);
+          deleteCellAt(idx);
+        };
+
+        copyBtn.onclick = () => {
+          const cell = state.cells[selectedIndex()];
+          if (!cell) return;
+          state.clipboardCell = cloneCellForPaste(cell);
+        };
+
+        pasteBtn.onclick = () => {
+          if (!state.clipboardCell) return;
+          const idx = selectedIndex();
+          const pasted = cloneCellForPaste(state.clipboardCell);
+          state.cells.splice(idx + 1, 0, pasted);
+          state.focusedId = pasted.id;
+          publishSource();
+          render();
+        };
+
+        runBtn.onclick = () => {
+          const idx = selectedIndex();
+          const cell = state.cells[idx];
+          if (cell?.kind === "code") void runCell(cell, idx);
+        };
+
+        stopBtn.onclick = () => {
+          const cell = state.cells[selectedIndex()];
+          if (cell?.kind === "code") stopCell(cell);
         };
 
         runAllBtn.onclick = () => runAll();
