@@ -3,6 +3,7 @@ module Notebook
   , concatenateDocument
   , bindingNamesInCell
   , bindingNamesFromSource
+  , cellPreviewLine
   , NotebookModel
   , emptyNotebook
   ) where
@@ -10,8 +11,8 @@ module Notebook
 import Prelude
 
 import Cell (Cell, CellKind(..))
-import Data.Array (all, filter, foldMap, null, uncons)
-import Data.Maybe (Maybe(..), isJust)
+import Data.Array (all, filter, find, foldMap, head, null, uncons)
+import Data.Maybe (Maybe(..), fromMaybe, isJust)
 import Data.String (Pattern(..))
 import Data.String.CodeUnits as CU
 import Data.String.Common as SC
@@ -64,6 +65,26 @@ mapMaybe :: forall a b. (a -> Maybe b) -> Array a -> Array b
 mapMaybe f xs = foldMap (\x -> case f x of
   Nothing -> []
   Just y -> [ y ]) xs
+
+-- | One-line preview of a cell for the navigation panel. For text cells the
+-- | first non-empty line; for code cells the first non-blank, non-comment line.
+-- | Mirrors the former JS getCellPreviewLine so nav has a single source of truth.
+cellPreviewLine :: Cell -> String
+cellPreviewLine cell = case cell.kind of
+  Wysiwyg ->
+    let line = SC.trim (firstLine (orDefault cell.source "Text cell"))
+    in if line == "" then "Text cell" else line
+  Code ->
+    let
+      candidate = find (\l -> let t = SC.trim l in t /= "" && not (isComment t)) (sourceLines cell.source)
+      line = SC.trim (fromMaybe cell.source candidate)
+    in if line == "" then "Empty code cell" else line
+
+firstLine :: String -> String
+firstLine s = fromMaybe s (head (sourceLines s))
+
+orDefault :: String -> String -> String
+orDefault s fallback = if s == "" then fallback else s
 
 bindingNamesInCell :: Cell -> Array String
 bindingNamesInCell cell =

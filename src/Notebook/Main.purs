@@ -4,6 +4,7 @@ module Main
   , concatenateDocumentExport
   , bindingNamesExport
   , bindingNamesFromSourceExport
+  , cellPreviewLineExport
   , seedSignatureExport
   , extractVerdictDocsExport
   , defaultCellUiExport
@@ -28,6 +29,7 @@ import Notebook
   , concatenateDocument
   , bindingNamesInCell
   , bindingNamesFromSource
+  , cellPreviewLine
   )
 import Notebook.Model as NM
 import Notebook.Toolbar as TB
@@ -61,6 +63,9 @@ bindingNamesExport = mkEffectFn1 \row ->
 
 bindingNamesFromSourceExport :: EffectFn1 String (Array String)
 bindingNamesFromSourceExport = mkEffectFn1 \src -> pure (bindingNamesFromSource src)
+
+cellPreviewLineExport :: EffectFn1 Foreign String
+cellPreviewLineExport = mkEffectFn1 \row -> pure (cellPreviewLine (foreignToCell row))
 
 seedSignatureExport :: EffectFn1 String String
 seedSignatureExport = mkEffectFn1 \src -> pure (seedSignature src)

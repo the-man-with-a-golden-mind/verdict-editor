@@ -16,6 +16,7 @@ import {
   scanBindingNames,
   defaultCellUi,
   bindingNamesForCell,
+  cellPreviewLine,
   updateModel,
 } from "./NotebookPs.js";
 
@@ -945,14 +946,9 @@ export function mountNotebookImpl(selector) {
           await Promise.resolve(bridge.syncCellsNav?.(sections));
         }
 
-        function getCellPreviewLine(cell) {
-          if (cell.kind === "wysiwyg") {
-            const line = (cell.source || "Text cell").split("\n")[0].trim();
-            return line || "Text cell";
-          }
-          const line = (cell.source || "").split("\n").find((l) => l.trim() && !l.trim().startsWith("--"));
-          return (line ?? cell.source ?? "").trim() || "Empty code cell";
-        }
+        // Nav/preview line is computed in PureScript (Notebook.cellPreviewLine)
+        // so navigation has a single source of truth.
+        const getCellPreviewLine = (cell) => cellPreviewLine(cell);
 
         function cellHasOutput(cell) {
           return outputKeysForCell(cell).some((n) => state.outputs[`${cell.id}:${n}`]) || Boolean(state.errors[cell.id]);

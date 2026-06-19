@@ -6,6 +6,7 @@ import {
   concatenateCode,
   concatenateDocument,
   bindingNamesFromSource,
+  cellPreviewLine as psCellPreviewLine,
 } from "../Notebook/index.js";
 import { updateJsModel } from "../Notebook.Model/index.js";
 import { seedSignature } from "../Seed/index.js";
@@ -44,6 +45,11 @@ export function concatDocument(cells) {
 
 export function bindingNamesForCell(cell) {
   return bindingNamesFromSource(cell?.source ?? "");
+}
+
+/** One-line nav preview for a cell (delegates to the PureScript Notebook module). */
+export function cellPreviewLine(cell) {
+  return psCellPreviewLine(toPsCell(cell ?? {}));
 }
 
 export function scanBindingNames(source) {

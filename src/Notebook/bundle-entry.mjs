@@ -4,6 +4,7 @@ export {
   concatenateDocumentExport,
   bindingNamesExport,
   bindingNamesFromSourceExport,
+  cellPreviewLineExport,
   seedSignatureExport,
   extractVerdictDocsExport,
   defaultCellUiExport,
