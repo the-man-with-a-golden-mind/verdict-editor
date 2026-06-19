@@ -2,46 +2,37 @@
 
 import { mountWysiwyg } from "./WysiwygFFI.js";
 import { decodeDisplay, renderDisplayInto } from "./Display.js";
-import { colorizeImpl, createEditorImpl, disposeEditorImpl } from "./MonacoFFI.js";
-
-function bindingNames(source) {
-  const names = [];
-  for (const line of source.split("\n")) {
-    const t = line.trim();
-    if (!t || t.startsWith("--")) continue;
-    const eq = t.indexOf(" =");
-    if (eq > 0) {
-      const name = t.slice(0, eq).trim();
-      if (/^[a-z][a-zA-Z0-9_]*$/.test(name)) names.push(name);
-    }
-  }
-  return names;
-}
+import {
+  createVerdictEditor,
+  disposeVerdictEditor,
+} from "./verdictCm/VerdictCmEditor.js";
+import { highlightVerdictToHtml } from "./verdictCm/VerdictSyntax.js";
+import {
+  concatCode,
+  concatDocument,
+  seedSignature,
+  extractVerdictDocs,
+  docsToMap,
+  scanBindingNames,
+  defaultCellUi,
+  bindingNamesForCell,
+  updateModel,
+} from "./NotebookPs.js";
 
 function makeBindingHelpers(bridge) {
-  function bindingNamesForCell(cell, allCells, getSource) {
+  function bindingNamesForCellBridge(cell, allCells, getSource) {
     const cells = allCells.map((c) => ({ id: c.id, kind: c.kind, source: c.source }));
     if (bridge?.bindingNamesInCell) {
       return bridge.bindingNamesInCell(cell.id, cells, getSource());
     }
-    return bindingNames(cell.source);
+    return bindingNamesForCell(cell, allCells);
   }
 
   function isDefinitionOnlyCell(cell, allCells, getSource) {
-    return bindingNamesForCell(cell, allCells, getSource).length === 0;
+    return bindingNamesForCellBridge(cell, allCells, getSource).length === 0;
   }
 
-  return { bindingNamesForCell, isDefinitionOnlyCell };
-}
-
-let cellMonaco = null;
-
-async function colorize(code, bridge) {
-  return colorizeImpl(code)(bridge)();
-}
-
-function getMonacoEditor(bridge) {
-  return bridge?.monaco?.editor ?? null;
+  return { bindingNamesForCell: bindingNamesForCellBridge, isDefinitionOnlyCell };
 }
 
 function escapeHtml(s) {
@@ -51,32 +42,9 @@ function escapeHtml(s) {
     .replace(/>/g, "&gt;");
 }
 
-function defaultCellUi() {
-  return {
-    folded: false,
-    codeFolded: false,
-    outputFolded: false,
-    // Jupyter model: output renders LOCALLY under the cell by default. A cell can
-    // opt in to GLOBAL output (the shared right-side Output panel) with the
-    // cell ⋯ menu (output routing is editor UI only, not source directives).
-    outputTarget: "inline",
-    editorHeight: 160,
-    outputHeight: 180,
-  };
-}
-
 function ensureUi(cell) {
   if (!cell.ui) cell.ui = defaultCellUi();
   return cell.ui;
-}
-
-// Stable signature of the seed source. Persisted with the document so a changed
-// default program re-seeds instead of being permanently shadowed by an old save.
-function seedSignature(src) {
-  let h = 5381;
-  const s = String(src || "");
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
-  return `${s.length}:${h >>> 0}`;
 }
 
 function persist(state, bridge) {
@@ -123,24 +91,6 @@ function installVerticalResize(handle, getHeight, setHeight, { min = 72, max = 7
   });
 }
 
-function scanCellBindingNames(source) {
-  const names = [];
-  for (const line of String(source ?? "").split("\n")) {
-    if (line.startsWith(" ") || line.startsWith("\t")) continue;
-    const t = line.trim();
-    if (!t || t.startsWith("--")) continue;
-    if (t.startsWith("let ")) continue;
-    const eq = t.indexOf(" =");
-    if (eq <= 0) continue;
-    const name = t.slice(0, eq).trim();
-    if (!/^[a-z][a-zA-Z0-9_]*$/.test(name)) continue;
-    const rhs = t.slice(eq + 2).trim();
-    if (rhs === name || rhs.startsWith(`${name},`) || rhs.startsWith(`${name} }`)) continue;
-    names.push(name);
-  }
-  return names;
-}
-
 function mkGutterRunBtn(cell, idx, onRun, onStop, isRunning) {
   const btn = document.createElement("button");
   btn.type = "button";
@@ -185,15 +135,24 @@ export function mountNotebookImpl(selector) {
           focusedId: null,
           errors: {},
           cellDiags: {},
+          analysisSig: null,
+          cachedSignatures: [],
+          cachedEvalBindings: [],
+          cachedDocs: new Map(),
           maximizedCellId: null,
           running: new Set(),
           runControllers: {},
           executionCounts: {},
           executionSeq: 0,
           clipboardCell: null,
+          /** One CM6 instance moved between cells — unfocused cells use static preview. */
+          sharedEditor: null,
+          sharedEditorCellId: null,
         };
 
         let seq = 0;
+        let diagTimer = null;
+        let panelTimer = null;
         const newId = () => `cell-${++seq}-${Math.random().toString(36).slice(2, 6)}`;
 
         function mapLoadedCell(c) {
@@ -214,6 +173,31 @@ export function mountNotebookImpl(selector) {
           }));
         }
 
+        function modelSnapshot() {
+          return {
+            cells: state.cells.map((c) => ({
+              id: c.id,
+              kind: c.kind === "wysiwyg" ? "wysiwyg" : "code",
+              source: c.source ?? "",
+              ui: { ...defaultCellUi(), ...c.ui },
+            })),
+            focusedId: state.focusedId ?? null,
+            maximizedId: state.maximizedCellId ?? null,
+          };
+        }
+
+        function applyModel(next) {
+          state.cells = (next.cells ?? []).map(mapLoadedCell);
+          state.focusedId = next.focusedId ?? null;
+          state.maximizedCellId = next.maximizedId ?? null;
+        }
+
+        function updateNotebook(msg) {
+          const next = updateModel(modelSnapshot(), msg);
+          applyModel(next);
+          return next;
+        }
+
         /** JSON `{ seedSig, cells: [{ source }] }` or legacy single source string. */
         function parseInitialSeed(initial) {
           const text = String(initial || "");
@@ -226,6 +210,7 @@ export function mountNotebookImpl(selector) {
                   .filter(Boolean)
                   .join("\n\n");
                 return {
+                  formatVersion: doc.formatVersion ?? 1,
                   seedSig: doc.seedSig ?? seedSignature(joined),
                   cells: doc.cells.map((c) => mapLoadedCell(c)),
                 };
@@ -237,6 +222,7 @@ export function mountNotebookImpl(selector) {
           const trimmed = text.trim();
           const sources = trimmed ? [trimmed] : [""];
           return {
+            formatVersion: 1,
             seedSig: seedSignature(trimmed),
             cells: cellsFromSources(sources),
           };
@@ -246,7 +232,12 @@ export function mountNotebookImpl(selector) {
           const seeded = parseInitialSeed(initial);
           state.seedSig = seeded.seedSig;
           const saved = bridge.loadDocument?.();
-          if (saved?.cells?.length && saved.seedSig === seeded.seedSig && saved.cells.length === seeded.cells.length) {
+          if (
+            saved?.cells?.length &&
+            saved.seedSig === seeded.seedSig &&
+            (saved.formatVersion ?? 1) === (seeded.formatVersion ?? 1) &&
+            saved.cells.length === seeded.cells.length
+          ) {
             state.cells = saved.cells.map(mapLoadedCell);
           } else {
             state.cells = seeded.cells;
@@ -256,6 +247,11 @@ export function mountNotebookImpl(selector) {
         }
 
         initFromSeed(initialSource || "");
+
+        if (!state.focusedId) {
+          const firstCode = state.cells.find((c) => c.kind === "code");
+          if (firstCode) state.focusedId = firstCode.id;
+        }
 
         const defaultSeed = parseInitialSeed(initialSource || "");
 
@@ -286,63 +282,178 @@ export function mountNotebookImpl(selector) {
         async function evalCellOutputs(cell, cellIdx, signal) {
           const cellNames = bindingNamesForRun(cell);
           const src = getBridgeSource();
-          const chk = bridge.compile?.(src);
+          const chk = bridge.compileCellBindings?.(src, cellNames) ?? bridge.compile?.(src);
           if (chk && !chk.ok) {
             throw new Error(chk.error ?? "Compile failed");
           }
-          const prefixNames = [];
-          for (let i = 0; i <= cellIdx; i++) {
-            const c = state.cells[i];
-            if (c.kind === "code") prefixNames.push(...bindingNamesForRun(c));
-          }
-          const names = [...new Set(prefixNames.length ? prefixNames : cellNames)];
-          if (names.length === 0) return [];
+          if (cellNames.length === 0) return [];
+          // Each cell is its own runtime entity: run only this cell's bindings.
+          // Cross-cell state lives in the shared FinVM snapshot + IDE actor/cache layer.
           return await Promise.resolve(
-            bridge.evalCells?.(src, names, { signal, cellId: cell.id, cellIndex: cellIdx }) ?? [],
+            bridge.evalCells?.(src, cellNames, { signal, cellId: cell.id, cellIndex: cellIdx }) ?? [],
           );
         }
 
         function concatenate() {
-          return state.cells
-            .filter((c) => c.kind === "code")
-            .map((c) => c.source.trim())
-            .filter(Boolean)
-            .join("\n\n");
+          return concatCode(state.cells);
         }
 
         function concatenateDocument() {
-          const parts = [];
-          for (const c of state.cells) {
-            if (c.kind === "wysiwyg") {
-              const md = (c.source ?? "").trim();
-              if (!md) continue;
-              parts.push(md.split("\n").map((line) => `-- ${line}`).join("\n"));
-            } else {
-              const s = (c.source ?? "").trim();
-              if (s) parts.push(s);
-            }
-          }
-          return parts.join("\n\n");
+          return concatDocument(state.cells);
         }
 
         function publishSource() {
           const src = concatenate();
           bridge.onProgramChanged?.(src);
-          updateCellDiagnostics();
+          scheduleDiagnostics();
           persist(state, bridge);
+        }
+
+        let bridgeSyncTimer = null;
+        let persistTimer = null;
+
+        /** Typing path — debounce shell sync + localStorage on every keystroke. */
+        function onCellSourceEdit() {
+          scheduleSourceSync();
+          scheduleDiagnostics();
+        }
+
+        function scheduleSourceSync() {
+          if (bridgeSyncTimer !== null) window.clearTimeout(bridgeSyncTimer);
+          bridgeSyncTimer = window.setTimeout(() => {
+            bridgeSyncTimer = null;
+            bridge.onProgramChanged?.(concatenate());
+          }, 600);
+          if (persistTimer !== null) window.clearTimeout(persistTimer);
+          persistTimer = window.setTimeout(() => {
+            persistTimer = null;
+            persist(state, bridge);
+          }, 1200);
+        }
+
+        function scheduleDiagnostics() {
+          if (diagTimer !== null) window.clearTimeout(diagTimer);
+          diagTimer = window.setTimeout(() => {
+            diagTimer = null;
+            updateCellDiagnostics();
+          }, 500);
         }
 
         function updateCellDiagnostics() {
           const src = concatenate();
+          const sig = seedSignature(src);
+          if (state.analysisSig === sig) return;
+          state.analysisSig = sig;
+
           const cells = state.cells.map((c) => ({ id: c.id, kind: c.kind, source: c.source }));
           state.cellDiags = bridge.cellDiagnostics?.(src, cells) ?? {};
+
+          try {
+            state.cachedSignatures = bridge.signatures?.(src) ?? [];
+          } catch {
+            state.cachedSignatures = [];
+          }
+
+          const hasErrors = Object.values(state.cellDiags).some((arr) => arr.length > 0);
+          if (hasErrors) {
+            state.cachedEvalBindings = [];
+          } else {
+            try {
+              state.cachedEvalBindings = bridge.evalBindings?.(src) ?? [];
+            } catch {
+              state.cachedEvalBindings = [];
+            }
+          }
+
+          state.cachedDocs = docsToMap(extractVerdictDocs(src));
+          refreshFocusedPropEditorLanguageService();
+          refreshCellDiagTexts();
+        }
+
+        function refreshFocusedPropEditorLanguageService() {
+          if (state.sharedEditorCellId === state.focusedId) {
+            state.sharedEditor?.refreshLanguageService?.();
+          }
+        }
+
+        function refreshPropEditorLanguageService() {
+          refreshFocusedPropEditorLanguageService();
+        }
+
+        function refreshCellDiagTexts() {
+          for (const cell of state.cells) {
+            if (cell.kind !== "code") continue;
+            const wrap = stack.querySelector(`[data-cell-id="${cell.id}"]`);
+            if (!wrap) continue;
+            const diags = state.cellDiags[cell.id] ?? [];
+            let host = wrap.querySelector("[data-cell-diag-host]");
+            if (!diags.length) {
+              host?.remove();
+              continue;
+            }
+            if (!host) {
+              host = document.createElement("div");
+              host.className = "px-3 py-1";
+              host.dataset.cellDiagHost = "1";
+              const body = wrap.querySelector(".notebook-cell-body");
+              const out = wrap.querySelector("[data-cell-output]");
+              if (body) {
+                if (out) body.insertBefore(host, out);
+                else body.appendChild(host);
+              }
+            }
+            host.replaceChildren();
+            for (const d of diags) {
+              const el = document.createElement("div");
+              el.className = "text-xs text-rose-400 font-mono";
+              el.dataset.cellDiag = "1";
+              el.textContent = `Line ${d.line}: ${d.message}`;
+              host.appendChild(el);
+            }
+          }
+        }
+
+        function activeEditorCellId() {
+          return state.sharedEditorCellId ?? state.focusedId;
+        }
+
+        function buildNotebookLanguageService() {
+          let namesCache = null;
+          let namesSig = "";
+          return {
+            getCellDiags: () => {
+              const id = activeEditorCellId();
+              return id ? (state.cellDiags[id] ?? []) : [];
+            },
+            getCellSource: () => {
+              const cell = state.cells.find((c) => c.id === activeEditorCellId());
+              return cell?.source ?? state.sharedEditor?.getValue?.() ?? "";
+            },
+            getSignatures: () => state.cachedSignatures,
+            getEvalBindings: () => state.cachedEvalBindings,
+            getDocs: () => state.cachedDocs,
+            getBindingNames: () => {
+              const cell = state.cells.find((c) => c.id === activeEditorCellId());
+              if (!cell) return [];
+              const cs = cell.source ?? "";
+              const sig = seedSignature(cs);
+              if (namesSig !== sig) {
+                namesSig = sig;
+                namesCache = bindingNamesForCell(cell, state.cells, concatenate);
+              }
+              return namesCache ?? [];
+            },
+          };
         }
 
         const api = {
           notebookSource: () => concatenate(),
           notebookDocumentSource: () => concatenateDocument(),
           setSource: (src) => {
-            state.cells = [{ id: newId(), kind: "code", source: src || "", ui: defaultCellUi() }];
+            updateNotebook({
+              tag: "replaceOne",
+              cell: { id: newId(), kind: "code", source: src || "", ui: defaultCellUi() },
+            });
             publishSource();
             render();
           },
@@ -358,58 +469,41 @@ export function mountNotebookImpl(selector) {
             if (c) stopCell(c);
           },
           focusCellById: (id) => {
-            state.focusedId = id;
-            void render().then(() => {
-              stack
-                .querySelector(`[data-cell-id="${id}"]`)
-                ?.scrollIntoView({ behavior: "smooth", block: "center" });
-            });
+            focusCell(id);
           },
+          notebookCells: () =>
+            state.cells.map((c) => ({
+              id: c.id,
+              kind: c.kind,
+              source: c.source ?? "",
+            })),
         };
 
         const root = document.createElement("div");
         root.className = "flex h-full min-h-0 flex-col bg-[#0b0f1a]";
         root.dataset.notebookRoot = "1";
 
+        // Toolbar is a PureScript ps-spa component (Notebook.Toolbar). It renders
+        // into this host; button handlers are passed as JS thunks (see toolbarProps
+        // below). The host keeps the toolbar's outer chrome (border/background) so
+        // the PS component only owns the buttons.
         const toolbar = document.createElement("div");
         toolbar.className =
-          "notebook-toolbar flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-800 bg-slate-950 px-3 py-2";
-
-        const mkBtn = (label, extra, title) => {
-          const b = document.createElement("button");
-          b.type = "button";
-          b.className =
-            "rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-slate-300 hover:border-indigo-400/50 hover:text-white " +
-            (extra ?? "");
-          b.textContent = label;
-          if (title) b.title = title;
-          return b;
-        };
-
-        const saveVnbBtn = mkBtn("Save", "border-slate-600", "Save notebook as .vnb");
-        const addCodeBtn = mkBtn("+ Code", "", "Insert a code cell");
-        const addTextBtn = mkBtn("+ Text", "", "Insert a text cell");
-        const cutBtn = mkBtn("Cut", "", "Cut selected cell");
-        const copyBtn = mkBtn("Copy", "", "Copy selected cell");
-        const pasteBtn = mkBtn("Paste", "", "Paste copied cell below selected cell");
-        const runBtn = mkBtn("Run", "border-emerald-500/40 text-emerald-200", "Run selected cell");
-        const stopBtn = mkBtn("Stop", "border-rose-500/40 text-rose-200", "Stop selected cell");
-        const runAllBtn = mkBtn("Run all", "border-emerald-500/40 text-emerald-200", "Run every code cell once");
-        const sourceBtn = mkBtn("Source", "", "Open the concatenated Verdict source");
-        const openVerdictBtn = mkBtn("Open", "", "Open .verdict or .vnb");
-        const resetBtn = mkBtn("Reset", "border-rose-500/40 text-rose-200", "Reset to default example");
+          "notebook-toolbar-host flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-800 bg-slate-950 px-3 py-2";
 
         // Re-seed from the default program, discarding any saved notebook. Escapes
         // stale `.vnb` state from older layouts.
-        resetBtn.onclick = () => {
+        const onReset = () => {
           if (!confirm("Reset the notebook to the default example? This discards your current cells.")) return;
-          state.cells = defaultSeed.cells.map((c) => ({
-            ...c,
-            id: newId(),
-            ui: { ...defaultCellUi(), ...c.ui },
-          }));
+          updateNotebook({
+            tag: "replaceCells",
+            cells: defaultSeed.cells.map((c) => ({
+              ...c,
+              id: newId(),
+              ui: { ...defaultCellUi(), ...c.ui },
+            })),
+          });
           state.seedSig = defaultSeed.seedSig;
-          state.focusedId = state.cells[0] ? state.cells[0].id : null;
           state.outputs = {};
           state.errors = {};
           state.running = new Set();
@@ -451,7 +545,7 @@ export function mountNotebookImpl(selector) {
             try {
               const doc = JSON.parse(text);
               if (doc?.cells?.length) {
-                state.cells = doc.cells.map(mapLoadedCell);
+                updateNotebook({ tag: "replaceCells", cells: doc.cells.map(mapLoadedCell) });
                 publishSource();
                 render();
                 return;
@@ -460,29 +554,25 @@ export function mountNotebookImpl(selector) {
               /* fall through as plain source */
             }
           }
-          state.cells = [{ id: newId(), kind: "code", source: text, ui: defaultCellUi() }];
-          state.focusedId = state.cells[0].id;
+          updateNotebook({
+            tag: "replaceOne",
+            cell: { id: newId(), kind: "code", source: text, ui: defaultCellUi() },
+          });
           publishSource();
           render();
         };
 
-        toolbar.appendChild(saveVnbBtn);
-        toolbar.appendChild(addCodeBtn);
-        toolbar.appendChild(addTextBtn);
-        toolbar.appendChild(cutBtn);
-        toolbar.appendChild(copyBtn);
-        toolbar.appendChild(pasteBtn);
-        toolbar.appendChild(runBtn);
-        toolbar.appendChild(stopBtn);
-        toolbar.appendChild(runAllBtn);
-        toolbar.appendChild(sourceBtn);
-        toolbar.appendChild(openVerdictBtn);
-        toolbar.appendChild(resetBtn);
+        // The buttons themselves are rendered by the PureScript ps-spa toolbar
+        // (mounted below). Only the hidden file input stays as plain DOM since
+        // <input type=file> needs a real element to drive the OS picker.
+        const toolbarButtonHost = document.createElement("div");
+        toolbarButtonHost.className = "contents";
+        toolbar.appendChild(toolbarButtonHost);
         toolbar.appendChild(fileInput);
 
-        openVerdictBtn.onclick = () => fileInput.click();
-        saveVnbBtn.onclick = () => downloadVnb();
-        sourceBtn.onclick = () => bridge.setSourceMode?.(true);
+        const onOpen = () => fileInput.click();
+        const onSave = () => downloadVnb();
+        const onSource = () => bridge.setSourceMode?.(true);
 
         const bodyWrap = document.createElement("div");
         bodyWrap.className = "flex min-h-0 flex-1 flex-row";
@@ -491,14 +581,7 @@ export function mountNotebookImpl(selector) {
         stack.className = "notebook-stack-scroll flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-3 py-3 flex flex-col gap-3";
         stack.dataset.notebookStack = "1";
 
-        // Cell navigation now lives in the editor's right-side panel (merged with
-        // output + run). This inline rail is kept hidden for backward compatibility.
-        const nav = document.createElement("div");
-        nav.className = "notebook-nav hidden";
-        nav.dataset.notebookNav = "1";
-
         bodyWrap.appendChild(stack);
-        bodyWrap.appendChild(nav);
 
         function getBridgeSource() {
           return bridge.materialize?.(concatenate()) ?? concatenate();
@@ -507,7 +590,7 @@ export function mountNotebookImpl(selector) {
         function bindingNamesForRun(cell) {
           const fromBridge = bindingNamesForCell(cell, state.cells, concatenate);
           if (fromBridge.length > 0) return fromBridge;
-          return scanCellBindingNames(cell.source);
+          return scanBindingNames(cell.source);
         }
 
         function outputKeysForCell(cell) {
@@ -521,12 +604,13 @@ export function mountNotebookImpl(selector) {
         async function runCell(cell, cellIdx) {
           if (cell.kind !== "code") return;
           if (state.running.has(cell.id)) return;
+          syncSharedEditorSource();
           const controller = new AbortController();
           state.runControllers[cell.id] = controller;
           state.running.add(cell.id);
           const ui = ensureUi(cell);
-          ui.outputFolded = false;
-          await render();
+          updateNotebook({ tag: "setOutputFolded", id: cell.id, folded: false });
+          schedulePublishPanel();
           try {
             const cellNames = bindingNamesForRun(cell);
             if (cellNames.length === 0) {
@@ -545,7 +629,8 @@ export function mountNotebookImpl(selector) {
             }
             state.running.delete(cell.id);
             delete state.runControllers[cell.id];
-            await render();
+            await refreshCellOutput(cell, cellIdx);
+            schedulePublishPanel();
           }
         }
 
@@ -556,55 +641,6 @@ export function mountNotebookImpl(selector) {
           delete state.runControllers[cell.id];
           state.errors[cell.id] = "Stopped.";
           render();
-        }
-
-        async function buildNav() {
-          nav.innerHTML = "";
-          const title = document.createElement("div");
-          title.className = "px-1 pb-1 text-[10px] font-bold uppercase tracking-wide text-slate-500";
-          title.textContent = `Cells · ${state.cells.length}`;
-          nav.appendChild(title);
-          for (let i = 0; i < state.cells.length; i++) {
-            const cell = state.cells[i];
-            const active = state.focusedId === cell.id;
-            const card = document.createElement("button");
-            card.type = "button";
-            card.dataset.navCell = cell.id;
-            card.className =
-              "notebook-nav-card flex flex-col gap-0.5 rounded border px-2 py-1.5 text-left transition-colors " +
-              (active
-                ? "border-indigo-400/60 bg-indigo-500/10"
-                : "border-slate-800 bg-slate-900/60 hover:border-slate-600");
-            const head = document.createElement("div");
-            head.className = "flex items-center justify-between text-[10px] text-slate-500";
-            const label = document.createElement("span");
-            label.textContent = `${i + 1} · ${cell.kind === "wysiwyg" ? "Text" : "Code"}`;
-            head.appendChild(label);
-            if (state.running.has(cell.id)) {
-              const r = document.createElement("span");
-              r.className = "text-rose-300";
-              r.textContent = "● run";
-              head.appendChild(r);
-            } else if (cellHasOutput(cell)) {
-              const d = document.createElement("span");
-              d.className = "text-emerald-400/80";
-              d.textContent = "●";
-              head.appendChild(d);
-            }
-            const prev = document.createElement("div");
-            prev.className = "truncate font-mono text-[11px] text-slate-300";
-            prev.textContent = await getCellPreviewLine(cell);
-            card.appendChild(head);
-            card.appendChild(prev);
-            card.onclick = async () => {
-              state.focusedId = cell.id;
-              await render();
-              stack
-                .querySelector(`[data-cell-id="${cell.id}"]`)
-                ?.scrollIntoView({ behavior: "smooth", block: "center" });
-            };
-            nav.appendChild(card);
-          }
         }
 
         async function runAll() {
@@ -622,10 +658,17 @@ export function mountNotebookImpl(selector) {
         // --- Cell management (operate on whole cell objects so `ui` is preserved) ---
         function addCellBelow(idx, kind) {
           const cell = { id: newId(), kind: kind === "wysiwyg" ? "wysiwyg" : "code", source: "", ui: defaultCellUi() };
-          state.cells.splice(idx + 1, 0, cell);
-          if (cell.kind === "code") state.focusedId = cell.id;
+          const anchor = state.cells[idx];
+          updateNotebook({ tag: "insertBelow", id: anchor?.id ?? "", cell });
           publishSource();
-          render();
+          if (canIncrementalDom()) {
+            void insertCellDom(idx + 1).then(() => {
+              if (cell.kind === "code") focusCell(cell.id);
+              schedulePublishPanel();
+            });
+          } else {
+            render();
+          }
         }
 
         function selectedIndex() {
@@ -645,34 +688,212 @@ export function mountNotebookImpl(selector) {
         function deleteCellAt(idx) {
           const cell = state.cells[idx];
           if (!cell) return;
+          const removedId = cell.id;
+          disposePropEditorForCell(removedId);
           for (const k of Object.keys(state.outputs)) {
-            if (k.startsWith(`${cell.id}:`)) delete state.outputs[k];
+            if (k.startsWith(`${removedId}:`)) delete state.outputs[k];
           }
-          delete state.errors[cell.id];
-          state.cells.splice(idx, 1);
-          if (state.focusedId === cell.id) state.focusedId = null;
-          if (state.maximizedCellId === cell.id) state.maximizedCellId = null;
-          if (state.cells.length === 0) {
-            state.cells.push({ id: newId(), kind: "code", source: "", ui: defaultCellUi() });
-          }
+          delete state.errors[removedId];
+          updateNotebook({
+            tag: "deleteCell",
+            id: removedId,
+            fallbackCell: { id: newId(), kind: "code", source: "", ui: defaultCellUi() },
+          });
           publishSource();
-          render();
+          if (canIncrementalDom()) {
+            removeCellDom(removedId);
+            if (!state.focusedId) {
+              const next = state.cells.find((c) => c.kind === "code");
+              if (next) focusCell(next.id);
+            }
+            schedulePublishPanel();
+          } else {
+            render();
+          }
         }
 
         function moveCellBy(idx, delta) {
-          const j = Math.max(0, Math.min(state.cells.length - 1, idx + delta));
-          if (j === idx) return;
-          const [cell] = state.cells.splice(idx, 1);
-          state.cells.splice(j, 0, cell);
+          const cell = state.cells[idx];
+          if (!cell) return;
+          updateNotebook({ tag: "moveCell", id: cell.id, delta });
           publishSource();
           render();
         }
 
-        function destroyCellMonaco() {
-          if (cellMonaco) {
-            disposeEditorImpl(cellMonaco)();
-            cellMonaco = null;
+        function disposeSharedEditor() {
+          if (state.sharedEditor) {
+            disposeVerdictEditor(state.sharedEditor);
+            state.sharedEditor = null;
+            state.sharedEditorCellId = null;
           }
+        }
+
+        function syncSharedEditorSource() {
+          if (!state.sharedEditor || !state.sharedEditorCellId) return;
+          const cell = state.cells.find((c) => c.id === state.sharedEditorCellId);
+          if (cell) cell.source = state.sharedEditor.getValue();
+        }
+
+        function renderCodeCellPreview(host, cell) {
+          host.innerHTML = "";
+          host.classList.remove("verdict-cm-host");
+          host.classList.add("notebook-cell-editor", "notebook-cell-editor--preview");
+          const pre = document.createElement("pre");
+          pre.className =
+            "notebook-cell-source-preview m-0 min-h-[2rem] cursor-text overflow-auto px-3 py-2 font-mono text-xs leading-relaxed text-slate-200";
+          pre.innerHTML = highlightVerdictToHtml(cell.source ?? "");
+          pre.tabIndex = 0;
+          pre.onmousedown = (e) => {
+            e.preventDefault();
+            focusCell(cell.id);
+          };
+          host.appendChild(pre);
+        }
+
+        // Grow the active cell's host to fit the editor content (Jupyter-style),
+        // capped so very long cells scroll instead of taking over the viewport.
+        function fitActiveHost() {
+          const ed = state.sharedEditor;
+          if (!ed || !state.sharedEditorCellId) return;
+          const cell = state.cells.find((c) => c.id === state.sharedEditorCellId);
+          if (cell?.ui?.editorResized) return; // user pinned this cell's height
+          const host = stack.querySelector(`[data-cell-editor-host="${state.sharedEditorCellId}"]`);
+          if (!host) return;
+          const content = ed.view?.contentHeight ?? 0;
+          host.style.height = `${Math.min(Math.max(content + 14, 48), 1600)}px`;
+        }
+
+        function attachSharedEditorToCell(cellId) {
+          const cell = state.cells.find((c) => c.id === cellId);
+          const host = stack.querySelector(`[data-cell-editor-host="${cellId}"]`);
+          if (!cell || cell.kind !== "code" || !host) return;
+
+          host.classList.remove("notebook-cell-editor--preview");
+          host.style.overflow = "hidden";
+
+          if (!state.sharedEditor) {
+            state.sharedEditor = createVerdictEditor(host, {
+              variant: "cell",
+              value: cell.source ?? "",
+              editable: true,
+              languageService: buildNotebookLanguageService(),
+              onChange: (v) => {
+                const activeCell =
+                  state.cells.find((c) => c.id === state.sharedEditorCellId) ?? cell;
+                updateNotebook({ tag: "setSource", id: activeCell.id, source: v });
+                fitActiveHost();
+                onCellSourceEdit();
+              },
+              onFocus: () => {
+                const activeId = state.sharedEditorCellId ?? cellId;
+                if (state.focusedId !== activeId) focusCell(activeId);
+              },
+            });
+            state.sharedEditorCellId = cellId;
+            state.sharedEditor.focus();
+            requestAnimationFrame(fitActiveHost);
+            return;
+          }
+
+          const ed = state.sharedEditor;
+          if (ed.view.dom.parentElement !== host) {
+            host.innerHTML = "";
+            host.appendChild(ed.view.dom);
+          }
+          if (state.sharedEditorCellId !== cellId) {
+            syncSharedEditorSource();
+            state.sharedEditorCellId = cellId;
+            ed.setValue(cell.source ?? "");
+          }
+          ed.setEditable(true);
+          ed.refreshLanguageService();
+          ed.focus();
+          requestAnimationFrame(fitActiveHost);
+        }
+
+        function disposePropEditorForCell(cellId) {
+          if (state.sharedEditorCellId !== cellId || !state.sharedEditor) return;
+          syncSharedEditorSource();
+          const host = stack.querySelector(`[data-cell-editor-host="${cellId}"]`);
+          if (host?.contains(state.sharedEditor.view.dom)) {
+            host.removeChild(state.sharedEditor.view.dom);
+          }
+          state.sharedEditorCellId = null;
+        }
+
+        function disposeAllPropEditors() {
+          disposeSharedEditor();
+        }
+
+        function applyFocusPatch() {
+          for (const el of stack.querySelectorAll("[data-cell-id]")) {
+            const cid = el.dataset.cellId;
+            const focused = state.focusedId === cid;
+            el.classList.toggle("border-indigo-400/70", focused);
+            el.classList.toggle("border-slate-800", !focused);
+            el.dataset.cellFocused = focused ? "1" : "0";
+          }
+        }
+
+        function swapEditorForFocus(prevId, nextId) {
+          syncSharedEditorSource();
+          if (prevId && prevId !== nextId) {
+            const prevCell = state.cells.find((c) => c.id === prevId);
+            const prevHost = stack.querySelector(`[data-cell-editor-host="${prevId}"]`);
+            if (prevCell?.kind === "code" && prevHost) {
+              if (state.sharedEditor?.view.dom.parentElement === prevHost) {
+                prevHost.removeChild(state.sharedEditor.view.dom);
+              }
+              renderCodeCellPreview(prevHost, prevCell);
+            }
+          }
+          if (nextId) attachSharedEditorToCell(nextId);
+        }
+
+        function scrollCellIntoView(id) {
+          stack.querySelector(`[data-cell-id="${id}"]`)?.scrollIntoView({ block: "nearest" });
+        }
+
+        function focusCell(id) {
+          if (state.focusedId === id) {
+            if (!bridge.isSourceMode?.() && stack.querySelector(`[data-cell-id="${id}"]`)) {
+              applyFocusPatch();
+              if (state.sharedEditorCellId !== id) {
+                swapEditorForFocus(state.sharedEditorCellId, id);
+              }
+              schedulePublishPanel();
+            }
+            scrollCellIntoView(id);
+            return;
+          }
+          const prevId = state.focusedId;
+          updateNotebook({ tag: "focus", id });
+          if (!bridge.isSourceMode?.() && stack.querySelector(`[data-cell-id="${id}"]`)) {
+            applyFocusPatch();
+            swapEditorForFocus(prevId, id);
+            scrollCellIntoView(id);
+            schedulePublishPanel();
+            return;
+          }
+          void render();
+        }
+
+        function schedulePublishPanel() {
+          if (panelTimer !== null) window.clearTimeout(panelTimer);
+          panelTimer = window.setTimeout(() => {
+            panelTimer = null;
+            void publishPanel();
+          }, 80);
+        }
+
+        async function refreshCellOutput(cell, idx) {
+          const outHost = stack.querySelector(`[data-cell-output="${cell.id}"]`);
+          if (!outHost) {
+            await render();
+            return;
+          }
+          outHost.innerHTML = "";
+          await fillOutputHost(outHost, cell, idx);
         }
 
         async function fillOutputHost(hostEl, cell, idx) {
@@ -707,7 +928,6 @@ export function mountNotebookImpl(selector) {
           for (let i = 0; i < state.cells.length; i++) {
             const cell = state.cells[i];
             const ui = ensureUi(cell);
-            const local = ui.outputTarget !== "global";
             const names = bindingNamesForRun(cell);
             const allOutputs = names
               .map((n) => state.outputs[`${cell.id}:${n}`])
@@ -716,21 +936,16 @@ export function mountNotebookImpl(selector) {
               cellIndex: i,
               cellId: cell.id,
               kind: cell.kind === "wysiwyg" ? "text" : "code",
-              preview: await getCellPreviewLine(cell),
+              preview: getCellPreviewLine(cell),
               running: state.running.has(cell.id),
               focused: state.focusedId === cell.id,
               hasOutput: allOutputs.length > 0 || Boolean(state.errors[cell.id]),
-              // Inline cells render output in the body; the panel only shows their
-              // nav + run controls (no duplicated output).
-              local,
-              outputs: local ? [] : allOutputs,
-              error: local ? undefined : state.errors[cell.id] || undefined,
             });
           }
-          await Promise.resolve(bridge.syncGlobalOutput?.(sections));
+          await Promise.resolve(bridge.syncCellsNav?.(sections));
         }
 
-        async function getCellPreviewLine(cell) {
+        function getCellPreviewLine(cell) {
           if (cell.kind === "wysiwyg") {
             const line = (cell.source || "Text cell").split("\n")[0].trim();
             return line || "Text cell";
@@ -782,8 +997,7 @@ export function mountNotebookImpl(selector) {
           // Fold and Hide-output are gutter icons (see appendCellGutterControls).
           if (isCodeCell && idx > 0) item("Run above", () => void runAbove(idx));
           item(isMax ? "Minimize" : "Maximize", () => {
-            state.maximizedCellId = isMax ? null : cell.id;
-            if (isMax) state.focusedId = cell.id;
+            updateNotebook({ tag: "maximize", id: cell.id });
             render();
           });
           sep();
@@ -820,9 +1034,12 @@ export function mountNotebookImpl(selector) {
             { key: "foldCell", value: cell.id },
           );
           foldBtn.onclick = () => {
-            ui.folded = !ui.folded;
-            if (!ui.folded && cell.kind === "code") state.focusedId = cell.id;
-            render();
+            const willExpand = ui.folded;
+            updateNotebook({ tag: "toggleFold", id: cell.id });
+            if (willExpand && cell.kind === "code") {
+              updateNotebook({ tag: "focus", id: cell.id });
+            }
+            void patchCellDom(cell.id);
           };
           gutter.appendChild(foldBtn);
 
@@ -835,8 +1052,8 @@ export function mountNotebookImpl(selector) {
               { key: "codeToggle", value: cell.id },
             );
             codeBtn.onclick = () => {
-              ui.codeFolded = !ui.codeFolded;
-              render();
+              updateNotebook({ tag: "toggleCodeFold", id: cell.id });
+              void patchCellDom(cell.id);
             };
             gutter.appendChild(codeBtn);
 
@@ -848,8 +1065,8 @@ export function mountNotebookImpl(selector) {
               { key: "outputToggle", value: cell.id },
             );
             outBtn.onclick = () => {
-              ui.outputFolded = !ui.outputFolded;
-              render();
+              updateNotebook({ tag: "toggleOutputFold", id: cell.id });
+              void patchCellDom(cell.id);
             };
             gutter.appendChild(outBtn);
           }
@@ -869,7 +1086,7 @@ export function mountNotebookImpl(selector) {
           appendCellGutterControls(gutter, cell, idx, ui, isCodeCell, isMax, { compact: true });
 
           const body = document.createElement("div");
-          body.className = "flex min-w-0 flex-1 flex-col min-h-0";
+          body.className = "notebook-cell-body flex min-w-0 flex-1 flex-col min-h-0";
 
           const previewRow = document.createElement("div");
           previewRow.className = "notebook-cell-folded-head flex min-h-[2rem] min-w-0 items-center px-2 py-1";
@@ -877,10 +1094,10 @@ export function mountNotebookImpl(selector) {
           preview.className =
             "min-w-0 flex-1 truncate font-mono text-xs text-slate-400 cursor-pointer hover:text-slate-200";
           preview.title = "Click to expand cell";
-          preview.textContent = await getCellPreviewLine(cell);
+          preview.textContent = getCellPreviewLine(cell);
           preview.onclick = () => {
-            ui.folded = false;
-            if (cell.kind === "code") state.focusedId = cell.id;
+            updateNotebook({ tag: "setFolded", id: cell.id, folded: false });
+            if (cell.kind === "code") updateNotebook({ tag: "focus", id: cell.id });
             render();
           };
           previewRow.appendChild(preview);
@@ -924,7 +1141,7 @@ export function mountNotebookImpl(selector) {
           appendCellGutterControls(gutter, cell, idx, ui, isCodeCell, isMax);
 
           const body = document.createElement("div");
-          body.className = "flex min-w-0 flex-1 flex-col min-h-0";
+          body.className = "notebook-cell-body flex min-w-0 flex-1 flex-col min-h-0";
 
           const cellHead = document.createElement("div");
           cellHead.className =
@@ -932,11 +1149,8 @@ export function mountNotebookImpl(selector) {
           const cellTitle = document.createElement("button");
           cellTitle.type = "button";
           cellTitle.className = "min-w-0 truncate text-left font-mono text-[11px] text-slate-400 hover:text-slate-200";
-          cellTitle.textContent = await getCellPreviewLine(cell);
-          cellTitle.onclick = () => {
-            state.focusedId = cell.id;
-            render();
-          };
+          cellTitle.textContent = getCellPreviewLine(cell);
+          cellTitle.onclick = () => focusCell(cell.id);
           const cellKind = document.createElement("span");
           cellKind.className =
             "ml-3 shrink-0 rounded border border-slate-700 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-500";
@@ -951,78 +1165,69 @@ export function mountNotebookImpl(selector) {
               "flex cursor-pointer items-center gap-2 px-3 py-1.5 text-[11px] italic text-slate-500 hover:text-slate-300";
             bar.textContent = "⟨ code hidden — click to show ⟩";
             bar.onclick = () => {
-              ui.codeFolded = false;
+              updateNotebook({ tag: "setCodeFolded", id: cell.id, folded: false });
               render();
             };
             body.appendChild(bar);
           } else {
           const editorSection = document.createElement("div");
-          editorSection.className = "notebook-cell-editor-section relative flex flex-col min-h-0";
+          editorSection.className =
+            "notebook-cell-editor-section relative flex flex-col min-h-0 overflow-hidden";
 
-          // Jupyter-style: the editor sizes to its content (no fixed-height box),
-          // growing with line count up to a cap, then scrolling.
+          // Jupyter-style: the editor shows its FULL content so the wheel scrolls
+          // the page between cells instead of getting trapped in a per-cell
+          // scrollbar. A manual drag (editorResized) pins an explicit height.
+          const maxEditorH = isMax ? 2400 : 1600;
           const lineCount = Math.max((cell.source || "").split("\n").length, 1);
-          const lineH = 19;
-          const maxEditorH = isMax ? 900 : 560;
-          const contentEditorH = Math.min(Math.max(lineCount * lineH + 20, 48), maxEditorH);
-
+          const autoH = Math.min(Math.max(lineCount * 18 + 18, 48), maxEditorH);
+          const contentH = ui.editorResized ? Math.min(Math.max(ui.editorHeight, 48), maxEditorH) : autoH;
           const editorHost = document.createElement("div");
-          editorHost.className = "notebook-cell-editor font-mono text-xs";
-          editorHost.style.height = `${contentEditorH}px`;
-
-          const monacoEditor = getMonacoEditor(bridge);
+          editorHost.className = "notebook-cell-editor font-mono text-xs verdict-cm-host";
+          editorHost.dataset.cellEditorHost = cell.id;
+          editorHost.style.height = `${contentH}px`;
+          editorHost.style.overflow = "hidden";
 
           if (cell.kind === "wysiwyg") {
             editorHost.style.height = "auto";
             mountWysiwyg(editorHost, cell.source, (md) => {
-              cell.source = md;
+              updateNotebook({ tag: "setSource", id: cell.id, source: md });
               persist(state, bridge);
             });
-          } else if (state.focusedId === cell.id && !bridge.isSourceMode?.() && monacoEditor?.create) {
-            destroyCellMonaco();
-            cellMonaco = createEditorImpl(editorHost)(cell.source)(bridge)();
-            // Grow/shrink the editor to fit its content as the user types.
-            const fitMonaco = () => {
-              if (!cellMonaco?.getContentHeight) return;
-              const h = Math.min(Math.max(cellMonaco.getContentHeight(), 48), maxEditorH);
-              editorHost.style.height = `${h}px`;
-              cellMonaco.layout?.();
-            };
-            if (cellMonaco?.onDidChangeModelContent) {
-              cellMonaco.onDidChangeModelContent(() => {
-                cell.source = cellMonaco.getValue();
-                fitMonaco();
-                publishSource();
-              });
+          } else if (cell.kind === "code" && !bridge.isSourceMode?.()) {
+            if (focused) {
+              editorHost.dataset.cellEditorActive = "1";
+            } else {
+              renderCodeCellPreview(editorHost, cell);
             }
-            if (cellMonaco?.onDidContentSizeChange) cellMonaco.onDidContentSizeChange(fitMonaco);
-            cellMonaco?.layout?.();
-            fitMonaco();
-            cellMonaco?.focus?.();
-          } else if (cell.kind === "code") {
-            editorHost.style.height = "auto";
-            editorHost.style.maxHeight = isMax ? "none" : `${maxEditorH}px`;
-            editorHost.style.overflowY = "auto";
-            const pre = document.createElement("div");
-            pre.className = "cursor-text px-3 py-2 text-slate-200";
-            pre.dataset.staticCode = "1";
-            pre.onclick = () => {
-              state.focusedId = cell.id;
-              render();
-            };
-            pre.innerHTML = await colorize(cell.source || "", bridge);
-            editorHost.appendChild(pre);
           }
 
           editorSection.appendChild(editorHost);
-
-          // No manual editor resize handle — the editor auto-fits its content.
-
           body.appendChild(editorSection);
+
+          // Drag handle to pin the editor height (overrides auto-fit).
+          if (cell.kind === "code" && !isMax) {
+            const editorResizer = document.createElement("div");
+            editorResizer.className = "notebook-cell-editor-resizer";
+            editorResizer.title = "Resize editor";
+            installVerticalResize(
+              editorResizer,
+              () => parseInt(editorHost.style.height, 10) || contentH,
+              (height) => {
+                const next = Math.round(height);
+                editorHost.style.height = `${next}px`;
+                if (state.sharedEditorCellId === cell.id) state.sharedEditor?.view?.requestMeasure?.();
+                updateNotebook({ tag: "setEditorHeight", id: cell.id, height: next });
+                persist(state, bridge);
+              },
+              { min: 48, max: maxEditorH },
+            );
+            body.appendChild(editorResizer);
+          }
           }
 
           const diagHost = document.createElement("div");
           diagHost.className = "px-3 py-1";
+          diagHost.dataset.cellDiagHost = "1";
           const diags = state.cellDiags[cell.id] ?? [];
           for (const d of diags) {
             const el = document.createElement("div");
@@ -1037,9 +1242,26 @@ export function mountNotebookImpl(selector) {
             const outHost = document.createElement("div");
             outHost.className = "notebook-output border-t border-slate-800 px-3 py-2 overflow-auto";
             outHost.dataset.cellOutput = cell.id;
-            outHost.style.maxHeight = isMax ? "none" : "600px";
+            outHost.style.maxHeight = isMax ? "none" : `${Math.max(ui.outputHeight, 96)}px`;
             await fillOutputHost(outHost, cell, idx);
             body.appendChild(outHost);
+            if (!isMax) {
+              const outputResizer = document.createElement("div");
+              outputResizer.className = "notebook-cell-output-resizer";
+              outputResizer.title = "Resize output";
+              installVerticalResize(
+                outputResizer,
+                () => Math.max(ui.outputHeight, 96),
+                (height) => {
+                  const nextHeight = Math.round(height);
+                  updateNotebook({ tag: "setOutputHeight", id: cell.id, height: nextHeight });
+                  outHost.style.maxHeight = `${nextHeight}px`;
+                  persist(state, bridge);
+                },
+                { min: 96, max: 1200 },
+              );
+              body.appendChild(outputResizer);
+            }
           }
 
           row.appendChild(gutter);
@@ -1048,21 +1270,66 @@ export function mountNotebookImpl(selector) {
           return wrap;
         }
 
-        async function render() {
+        function canIncrementalDom() {
+          return !state.maximizedCellId && !bridge.isSourceMode?.();
+        }
+
+        async function replaceCellDom(cellId) {
+          const idx = state.cells.findIndex((c) => c.id === cellId);
+          if (idx < 0) return;
+          disposePropEditorForCell(cellId);
+          const old = stack.querySelector(`[data-cell-id="${cellId}"]`);
+          const next = await renderCell(state.cells[idx], idx);
+          if (old) old.replaceWith(next);
+          else stack.appendChild(next);
+          if (state.focusedId === cellId) attachSharedEditorToCell(cellId);
+        }
+
+        async function insertCellDom(cellIdx) {
+          const cell = state.cells[cellIdx];
+          if (!cell) return;
+          const el = await renderCell(cell, cellIdx);
+          const ref = stack.children[cellIdx] ?? null;
+          if (ref) stack.insertBefore(el, ref);
+          else stack.appendChild(el);
+          if (state.focusedId === cell.id && cell.kind === "code") {
+            attachSharedEditorToCell(cell.id);
+          }
+        }
+
+        function removeCellDom(cellId) {
+          disposePropEditorForCell(cellId);
+          stack.querySelector(`[data-cell-id="${cellId}"]`)?.remove();
+        }
+
+        async function patchCellDom(cellId) {
+          if (!canIncrementalDom()) {
+            await renderFull();
+            return;
+          }
+          await replaceCellDom(cellId);
+          schedulePublishPanel();
+        }
+
+        async function renderFull() {
           const sourceMode = bridge.isSourceMode?.();
           bodyWrap.classList.toggle("hidden", !!sourceMode);
           if (sourceMode) {
-            destroyCellMonaco();
+            disposeAllPropEditors();
             return;
           }
 
           const maximized = state.maximizedCellId;
           toolbar.classList.toggle("hidden", !!maximized);
 
-          destroyCellMonaco();
+          syncSharedEditorSource();
+          if (state.sharedEditor?.view.dom.parentElement) {
+            state.sharedEditor.view.dom.parentElement.removeChild(state.sharedEditor.view.dom);
+          }
+          state.sharedEditorCellId = null;
+
           stack.innerHTML = "";
           stack.classList.toggle("notebook-stack--maximized", !!maximized);
-          updateCellDiagnostics();
 
           if (maximized) {
             const idx = state.cells.findIndex((c) => c.id === maximized);
@@ -1079,23 +1346,40 @@ export function mountNotebookImpl(selector) {
             }
           }
 
+          const focused = state.cells.find((c) => c.id === state.focusedId);
+          if (focused?.kind === "code") attachSharedEditorToCell(focused.id);
+
           await publishPanel();
         }
 
-        addCodeBtn.onclick = () => {
-          state.cells.push({ id: newId(), kind: "code", source: "", ui: defaultCellUi() });
-          state.focusedId = state.cells[state.cells.length - 1].id;
+        async function render() {
+          await renderFull();
+        }
+
+        const onAddCode = () => {
+          const cell = { id: newId(), kind: "code", source: "", ui: defaultCellUi() };
+          updateNotebook({ tag: "appendCell", cell });
           publishSource();
-          render();
+          if (canIncrementalDom()) {
+            void insertCellDom(state.cells.length - 1).then(() => {
+              focusCell(cell.id);
+              schedulePublishPanel();
+            });
+          } else {
+            render();
+          }
         };
 
-        addTextBtn.onclick = () => {
-          state.cells.push({ id: newId(), kind: "wysiwyg", source: "", ui: defaultCellUi() });
+        const onAddText = () => {
+          updateNotebook({
+            tag: "appendCell",
+            cell: { id: newId(), kind: "wysiwyg", source: "", ui: defaultCellUi() },
+          });
           persist(state, bridge);
           render();
         };
 
-        cutBtn.onclick = () => {
+        const onCut = () => {
           const idx = selectedIndex();
           const cell = state.cells[idx];
           if (!cell) return;
@@ -1103,34 +1387,60 @@ export function mountNotebookImpl(selector) {
           deleteCellAt(idx);
         };
 
-        copyBtn.onclick = () => {
+        const onCopy = () => {
           const cell = state.cells[selectedIndex()];
           if (!cell) return;
           state.clipboardCell = cloneCellForPaste(cell);
         };
 
-        pasteBtn.onclick = () => {
+        const onPaste = () => {
           if (!state.clipboardCell) return;
           const idx = selectedIndex();
           const pasted = cloneCellForPaste(state.clipboardCell);
-          state.cells.splice(idx + 1, 0, pasted);
-          state.focusedId = pasted.id;
+          const anchor = state.cells[idx];
+          updateNotebook({ tag: "insertBelow", id: anchor?.id ?? "", cell: pasted });
           publishSource();
-          render();
+          if (canIncrementalDom()) {
+            void insertCellDom(idx + 1).then(() => {
+              focusCell(pasted.id);
+              schedulePublishPanel();
+            });
+          } else {
+            render();
+          }
         };
 
-        runBtn.onclick = () => {
+        const onRun = () => {
           const idx = selectedIndex();
           const cell = state.cells[idx];
           if (cell?.kind === "code") void runCell(cell, idx);
         };
 
-        stopBtn.onclick = () => {
+        const onStop = () => {
           const cell = state.cells[selectedIndex()];
           if (cell?.kind === "code") stopCell(cell);
         };
 
-        runAllBtn.onclick = () => runAll();
+        const onRunAll = () => runAll();
+
+        // Mount the PureScript ps-spa toolbar, wiring each button to its handler.
+        const mountToolbar = globalThis.__notebookMountToolbar;
+        if (mountToolbar) {
+          mountToolbar(toolbarButtonHost, {
+            onSave,
+            onAddCode,
+            onAddText,
+            onCut,
+            onCopy,
+            onPaste,
+            onRun,
+            onStop,
+            onRunAll,
+            onSource,
+            onOpen,
+            onReset,
+          });
+        }
 
         root.appendChild(toolbar);
         root.appendChild(bodyWrap);
@@ -1152,12 +1462,11 @@ export function mountNotebookImpl(selector) {
             void runCell(focused, idx >= 0 ? idx : 0).then(() => {
               const nextIdx = state.cells.indexOf(focused);
               if (nextIdx >= 0 && nextIdx < state.cells.length - 1) {
-                state.focusedId = state.cells[nextIdx + 1].id;
-                render();
+                focusCell(state.cells[nextIdx + 1].id);
               }
             });
           } else if (e.key === "Escape" && state.maximizedCellId) {
-            state.maximizedCellId = null;
+            updateNotebook({ tag: "clearMaximize" });
             render();
           }
         };
@@ -1169,13 +1478,7 @@ export function mountNotebookImpl(selector) {
   };
 }
 
-export function concatenateCodeImpl(cells) {
-  return cells
-    .filter((c) => c.kind === "code")
-    .map((c) => (c.source ?? "").trim())
-    .filter(Boolean)
-    .join("\n\n");
-}
+export { concatCode as concatenateCodeImpl } from "./NotebookPs.js";
 
 export { decodeDisplay, renderDisplayInto } from "./Display.js";
 export { rowsToCsv, csvEscape } from "./SpreadsheetTable.js";

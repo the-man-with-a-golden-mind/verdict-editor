@@ -1,19 +1,29 @@
 export {
   mountNotebook,
   concatenateCodeExport,
+  concatenateDocumentExport,
   bindingNamesExport,
+  bindingNamesFromSourceExport,
+  seedSignatureExport,
+  extractVerdictDocsExport,
+  defaultCellUiExport,
+  updateModelExport,
   escapeFieldExport,
   rowsToCsvExport,
   decodeDisplayKindExport,
   spreadsheetCsvExport,
   renderDisplayIntoExport,
   mountSpreadsheetViewExport,
+  mountToolbarExport,
 } from "./output/Main/index.js";
 
 export { decodeDisplay, renderDisplayInto } from "./Display.js";
 
 import { registerPsMountTable } from "./Spreadsheet.js";
-import { mountSpreadsheetViewExport } from "./output/Main/index.js";
+import {
+  mountSpreadsheetViewExport,
+  mountToolbarExport as psMountToolbar,
+} from "./output/Main/index.js";
 import * as PsSpaBrowser from "./output/PsSpa.Browser/foreign.js";
 
 globalThis.__psSpaRenderDocumentOn = (host, documentConfig) => {
@@ -25,3 +35,7 @@ globalThis.__psSpaRenderDocumentOn = (host, documentConfig) => {
 
 globalThis.__notebookMountSpreadsheet = mountSpreadsheetViewExport;
 registerPsMountTable(mountSpreadsheetViewExport);
+
+// Mount the PureScript ps-spa toolbar into `host`, wiring each button to the
+// supplied JS callback thunks (Effect Unit across FFI).
+globalThis.__notebookMountToolbar = (host, props) => psMountToolbar(host, props);
