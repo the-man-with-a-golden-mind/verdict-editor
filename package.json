@@ -14,19 +14,30 @@
     "build:verdict-notebook": "node scripts/patch-verdict-bindings.mjs",
     "build:all": "npm run build:verdict-notebook && npm run build:notebook && npm run build",
     "build:test-eval": "node scripts/build-test-eval.mjs",
-    "test:notebook": "npm run build:test-eval && node --test tests-js/notebook-unit.test.mjs tests-js/notebook-bridge.test.mjs tests-js/notebook-bindings.test.mjs tests-js/notebook-shell.test.mjs tests-js/notebook-integration.test.mjs tests-js/notebook-vm-integration.test.mjs tests-js/notebook-vm-actors.test.mjs tests-js/notebook-verdict-actor.test.mjs tests-js/notebook-verdict-ide.test.mjs tests-js/notebook-display.test.mjs",
+    "test:notebook": "npm run build:test-eval && node --test tests-js/notebook-unit.test.mjs tests-js/notebook-bridge.test.mjs tests-js/notebook-project.test.mjs tests-js/notebook-bindings.test.mjs tests-js/notebook-shell.test.mjs tests-js/notebook-integration.test.mjs tests-js/notebook-vm-integration.test.mjs tests-js/notebook-vm-actors.test.mjs tests-js/notebook-verdict-actor.test.mjs tests-js/notebook-verdict-ide.test.mjs tests-js/notebook-cell-bus.test.mjs tests-js/notebook-display.test.mjs tests-js/notebook-prop-editor.test.mjs",
     "test:e2e:notebook": "npm run build:all && node tests-js/notebook-e2e.test.mjs",
+    "test:e2e:notebook-ui": "npm run build:notebook && npm run build && node tests-js/notebook-ui-e2e.test.mjs",
+    "test:e2e:prop-editor": "npm run build:all && node tests-js/notebook-prop-editor-e2e.test.mjs",
     "test:e2e:regression": "npm run build:all && node tests-js/regression-e2e.test.mjs"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "^6.20.3",
+    "@codemirror/commands": "^6.10.3",
+    "@codemirror/language": "^6.12.3",
+    "@codemirror/lint": "^6.9.7",
+    "@codemirror/search": "^6.7.1",
+    "@codemirror/state": "^6.6.0",
+    "@codemirror/tooltip": "^0.19.16",
+    "@codemirror/view": "^6.43.1",
+    "@lezer/highlight": "^1.2.3",
     "@tiptap/core": "^3.27.0",
     "@tiptap/pm": "^3.27.0",
     "@tiptap/starter-kit": "^3.27.0",
     "@v_m_v/finvm": "^1.2.0",
     "@v_m_v/verdict": "^1.1.0",
     "big-integer": "^1.6.52",
+    "codemirror": "^6.0.2",
     "marked": "^18.0.5",
-    "monaco-editor": "^0.55.1",
     "plotly.js-dist-min": "^2.35.3",
     "ps-spa": "file:.ps-spa-repo",
     "turndown": "^7.2.4"
@@ -40,7 +51,6 @@
     "purescript": "^0.15.15",
     "spago": "^1.0.4",
     "tailwindcss": "^4.3.1",
-    "vite": "^5.4.19",
-    "vite-plugin-monaco-editor": "^1.1.0"
+    "vite": "^5.4.19"
   }
 }

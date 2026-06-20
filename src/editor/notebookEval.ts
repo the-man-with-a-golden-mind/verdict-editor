@@ -143,8 +143,11 @@ export function vmValueToDisplay(value: unknown, typeSig: string): unknown {
 
 export function buildCellLineMap(cells: NotebookCellRef[]): Map<string, { startLine: number; endLine: number }> {
   const map = new Map<string, { startLine: number; endLine: number }>();
-  let line = 1;
   const codeCells = cells.filter((c) => c.kind === 'code');
+  // concatCode prepends `module Main exposing (..)\n\n` (2 lines) when the first
+  // code cell does not already start with a `module` header. Diagnostics run on
+  // that prepended source, so shift cell spans down to keep highlights aligned.
+  let line = codeCells.length && !/^\s*module\b/.test(codeCells[0].source) ? 3 : 1;
   for (let i = 0; i < codeCells.length; i++) {
     const cell = codeCells[i];
     const startLine = line;
@@ -232,6 +235,7 @@ async function runBindingOnFinvm(
   finvmState: Record<string, unknown>,
   effectStorage: EffectStorage,
   sourceSig: string,
+  signal?: AbortSignal,
 ): Promise<{ ok: true; result: unknown; finvmState: Record<string, unknown> } | { ok: false; error: string }> {
   try {
     const program = JSON.parse(programJson) as {
@@ -250,7 +254,7 @@ async function runBindingOnFinvm(
       state: userState,
       machineSnapshot: snapshot,
       entryFunction: bindingName,
-      handlers: createFinvmHandlers(effectStorage),
+      handlers: createFinvmHandlers(effectStorage, undefined, signal),
     });
     if (!vmOut.ok) return { ok: false, error: vmOut.error };
     const dbState = effectDbTablesToFinvmState(effectStorage.listDbTables());
@@ -278,6 +282,8 @@ export type NotebookEvalContext = {
 
 export type NotebookEvalOptions = {
   cell?: { id?: string; index?: number };
+  /** Aborts the run (rejects any pending `time.sleep`); set by Stop. */
+  signal?: AbortSignal;
 };
 
 export async function evalNotebookCells(
@@ -350,6 +356,7 @@ export async function evalNotebookCells(
       state,
       storage,
       srcSig,
+      opts?.signal,
     );
     if (!run.ok) {
       outputs.push({ name, ok: false, typeSig: sigOf(name), error: run.error });

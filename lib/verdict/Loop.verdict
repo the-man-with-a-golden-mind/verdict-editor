@@ -1,0 +1,17 @@
+module Loop exposing (sleep, loopEvery)
+
+-- Real timer effect. `time.sleep@1` lives in the `time` namespace, which the
+-- FinVM recognises as effectful (EFFECT_AWAIT), so the host fulfils it as an
+-- abortable setTimeout rather than a missing builtin. The cadence is whatever
+-- millisecond count the cell passes, keeping the loop delay in the cell source.
+sleep : Int -> Unit
+sleep ms = builtin("time.sleep@1", ms)
+
+-- One iteration of an in-cell loop: run `step`, then sleep `ms`. The notebook's
+-- Run re-invokes the cell while it is looping, so each pass does work and then
+-- waits `ms` via the real sleep effect; Stop aborts the pending sleep.
+loopEvery : Int -> (Unit -> a) -> a
+loopEvery ms step =
+  let result = step(unit) in
+  let _ = sleep(ms) in
+  result

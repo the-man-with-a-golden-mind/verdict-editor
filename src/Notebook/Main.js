@@ -11,6 +11,22 @@ export function unsafeReadString(o) {
   };
 }
 
+export function unsafeReadCellUi(o) {
+  return normalizeCellUi(o?.ui);
+}
+
+function normalizeCellUi(ui) {
+  return {
+    folded: Boolean(ui?.folded),
+    codeFolded: Boolean(ui?.codeFolded),
+    outputFolded: Boolean(ui?.outputFolded),
+    editorHeight: Number.isFinite(ui?.editorHeight) ? Math.round(ui.editorHeight) : 160,
+    editorResized: Boolean(ui?.editorResized),
+    outputHeight: Number.isFinite(ui?.outputHeight) ? Math.round(ui.outputHeight) : 180,
+    outputResized: Boolean(ui?.outputResized),
+  };
+}
+
 export function unsafeToRows(foreign) {
   if (!Array.isArray(foreign)) return [];
   return foreign.map((row) => (Array.isArray(row) ? row.map(String) : []));

@@ -12,7 +12,7 @@
   <body class="bg-[#0b0f1a]">
     <div id="app"></div>
     <!--
-      Load the editor (Monaco + the Verdict compiler/VM — by far the heaviest
+      Load the editor (CodeMirror + the Verdict compiler/VM — by far the heaviest
       code in the app) ONLY on the /editor route, and only the first time it's
       reached. Other pages (e.g. the landing page) ship none of it. The import
       defines the <verdict-editor> custom element; any already-rendered instance
@@ -52,7 +52,7 @@
               <div style="height:100%;width:35%;border-radius:999px;background:linear-gradient(90deg,#6366f1,#38bdf8,#6366f1);animation:editor-loader-slide 1.1s ease-in-out infinite;"></div>
             </div>
             <div style="margin-top:8px;color:#64748b;font:500 12px/1.3 Inter,sans-serif;">
-              Monaco and runtime are downloading lazily...
+              Editor and runtime are downloading lazily...
             </div>
           </div>
         `;

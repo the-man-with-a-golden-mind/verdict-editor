@@ -32,9 +32,11 @@ export function usesIdeLibrary(source: string): boolean {
   return /\b(ensureGlobal|bootGlobal|registerWorker|ask\b|idePut|ideGet)\b/.test(source);
 }
 
+/** Host substitutes __IDE_CELL_ID__ / __IDE_CELL_INDEX__ when a cell runs. */
 export function materializeIdeCellPlaceholders(
   source: string,
   cell?: { id?: string; index?: number },
+  _finvmState?: Record<string, unknown>,
 ): string {
   const cellId = cell?.id ?? '';
   const cellIndex = cell?.index ?? 0;

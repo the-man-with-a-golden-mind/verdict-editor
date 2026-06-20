@@ -23,15 +23,24 @@ function ensureSpagoSrc() {
 
 ensureSpagoSrc();
 
+const vcCanonical = path.join(root, "src/editor/verdictCm");
+const vcNotebook = path.join(nbDir, "verdictCm");
+fs.mkdirSync(vcNotebook, { recursive: true });
+for (const f of fs.readdirSync(vcCanonical)) {
+  if (f.endsWith(".js")) fs.copyFileSync(path.join(vcCanonical, f), path.join(vcNotebook, f));
+}
+
 const jsCopies = [
   "Main.js",
   "NotebookMount.js",
-  "Notebook.js",
+  "NotebookProject.js",
+  "NotebookPs.js",
   "WysiwygFFI.js",
   "Display.js",
   "Spreadsheet.js",
   "SpreadsheetTable.js",
-  "MonacoFFI.js",
+  "VerdictSyntax.js",
+  "VerdictLanguageService.js",
   "PlotlyFFI.js",
 ];
 
@@ -47,12 +56,20 @@ if (!fs.existsSync(entry)) {
 
 console.log("Bundling notebook.mjs…");
 const outRoot = path.join(nbDir, "output");
-for (const dir of fs.readdirSync(outRoot)) {
+  for (const dir of fs.readdirSync(outRoot)) {
   const full = path.join(outRoot, dir);
   if (!fs.statSync(full).isDirectory()) continue;
   for (const js of jsCopies) {
     const src = path.join(nbDir, js);
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(full, js));
+  }
+  const vcSrc = path.join(root, "src/editor/verdictCm");
+  const vcDst = path.join(full, "verdictCm");
+  if (fs.existsSync(vcSrc)) {
+    fs.mkdirSync(vcDst, { recursive: true });
+    for (const f of fs.readdirSync(vcSrc)) {
+      if (f.endsWith(".js")) fs.copyFileSync(path.join(vcSrc, f), path.join(vcDst, f));
+    }
   }
 }
 const outMain = path.join(nbDir, "output/Main");

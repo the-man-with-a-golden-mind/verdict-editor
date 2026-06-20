@@ -130,15 +130,15 @@ test("FinVM actors: spawned worker survives into a later cell run", async () => 
   assert.equal(worker2.function, "worker");
 });
 
-test("FinVM actors: prefix eval re-runs cell1 then cell2 without losing worker", async () => {
+test("FinVM actors: runAll-style sequential cells keep worker without prefix batch", async () => {
   const { evalNotebookCells, createEffectStorage, vlib, finvm, findProcess, FINVM_SNAPSHOT_KEY } =
     await loadLibs();
   const { ctx, getState } = makeCtx(vlib, finvm, createEffectStorage);
 
-  const out = await evalNotebookCells(ctx, ACTOR_MODULE, ["main", "step2"]);
-  assert.equal(out.length, 2);
-  assert.equal(out[0]?.ok, true);
-  assert.equal(out[1]?.ok, true);
+  const out1 = await evalNotebookCells(ctx, ACTOR_MODULE, ["main"]);
+  assert.equal(out1[0]?.ok, true);
+  const out2 = await evalNotebookCells(ctx, ACTOR_MODULE, ["step2"]);
+  assert.equal(out2[0]?.ok, true);
 
   const snap = getState()[FINVM_SNAPSHOT_KEY];
   const worker = findProcess(snap, "p0");

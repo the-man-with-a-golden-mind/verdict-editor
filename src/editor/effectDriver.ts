@@ -14,6 +14,7 @@ type FinVmTagless = Record<string, unknown>;
 export interface EffectStorage {
   dbInsert(table: string, record: unknown): string;
   dbGet(table: string, id: string): unknown | null;
+  dbQuery(table: string, filter: Record<string, unknown>): unknown[];
   dbUpdate(table: string, id: string, record: unknown): boolean;
   dbDelete(table: string, id: string): boolean;
   cacheSet(ns: string, key: string, value: unknown): boolean;
@@ -38,6 +39,14 @@ export function createEffectStorage(): EffectStorage {
     },
     dbGet(table, id) {
       return tbl(table).get(id) ?? null;
+    },
+    dbQuery(table, filter) {
+      const rows = tbl(table);
+      const out: unknown[] = [];
+      for (const [, value] of rows) {
+        if (recordMatchesFilter(value, filter)) out.push(value);
+      }
+      return out;
     },
     dbUpdate(table, id, record) {
       if (!tbl(table).has(id)) return false;
@@ -149,13 +158,62 @@ export function valueToJs(v: unknown): unknown {
   return v;
 }
 
+function recordMatchesFilter(record: unknown, filter: Record<string, unknown>): boolean {
+  if (!filter || Object.keys(filter).length === 0) {
+    return record != null && typeof record === 'object';
+  }
+  if (!record || typeof record !== 'object') return false;
+  const row = record as Record<string, unknown>;
+  for (const [key, expected] of Object.entries(filter)) {
+    if (!shallowEqualJsonField(row[key], expected)) return false;
+  }
+  return true;
+}
+
+function shallowEqualJsonField(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  if (typeof a === 'object' && typeof b === 'object') {
+    try {
+      return JSON.stringify(a) === JSON.stringify(b);
+    } catch {
+      return false;
+    }
+  }
+  return String(a) === String(b);
+}
+
 // Handlers return plain JS; runProgramWithEffects applies jsToValue once on
 // delivery. Returning tagless values here would double-encode the result.
 export function createFinvmHandlers(
   storage: EffectStorage,
   fetchImpl: typeof fetch = globalThis.fetch.bind(globalThis),
+  signal?: AbortSignal,
 ) {
   return {
+    // Real `time.sleep@1` effect (EFFECT_AWAIT). A cell's `sleep`/`loopEvery`
+    // helper emits this so the loop cadence lives in the cell source. The
+    // generic effect payload passes the single arg through as `args`, so the
+    // ms count arrives as `p.args` (number) rather than a named field. Stop
+    // aborts the run controller, which rejects the pending sleep so the VM run
+    // unwinds promptly instead of waiting out the full delay.
+    'time.sleep': async (p: { args?: unknown; ms?: unknown }) => {
+      const raw = p.ms ?? p.args ?? 0;
+      const ms = Math.max(0, Math.min(60000, Math.trunc(Number(raw) || 0)));
+      if (signal?.aborted) throw new Error('sleep aborted');
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(new Error('sleep aborted'));
+        };
+        const timer = setTimeout(() => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve();
+        }, ms);
+        signal?.addEventListener('abort', onAbort, { once: true });
+      });
+      return null;
+    },
     'http.get': async (p: { url?: string }) => {
       const url = String(p.url ?? '');
       const res = await fetchImpl(url, { method: 'GET' });
@@ -181,6 +239,10 @@ export function createFinvmHandlers(
     },
     'db.get': async (p: { table?: string; id?: string }) => {
       return storage.dbGet(String(p.table ?? ''), String(p.id ?? ''));
+    },
+    'db.query': async (p: { table?: string; query?: Record<string, unknown>; filter?: Record<string, unknown> }) => {
+      const filter = (p.query ?? p.filter ?? {}) as Record<string, unknown>;
+      return storage.dbQuery(String(p.table ?? ''), filter);
     },
     'db.update': async (p: { table?: string; id?: string; record?: unknown }) => {
       return storage.dbUpdate(String(p.table ?? ''), String(p.id ?? ''), p.record ?? {});

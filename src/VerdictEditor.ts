@@ -1,10 +1,5 @@
-// Monaco optimization: use the lightweight editor API and import only the
-// contributions we actively use. This trims bundle size versus `edcore.main`.
-import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
-import 'monaco-editor/esm/vs/editor/contrib/hover/browser/hoverContribution.js';
-import 'monaco-editor/esm/vs/editor/contrib/suggest/browser/suggest.js';
-import 'monaco-editor/esm/vs/editor/contrib/bracketMatching/browser/bracketMatching.js';
-import 'monaco-editor/esm/vs/editor/contrib/find/browser/findController.js';
+import { createVerdictEditor } from './editor/verdictCm/VerdictCmEditor.js';
+import { extractVerdictDocs } from './editor/verdictCm/VerdictLanguageService.js';
 import {
   mergeNotebookFinvmState,
   sourceSignature,
@@ -32,7 +27,7 @@ import {
   loadNotebookLib,
   loadVnbFromStorage,
   saveVnbToStorage,
-  type GlobalOutputSection,
+  type CellsNavSection,
   type NotebookApi,
   type NotebookBridge,
 } from './editor/notebookBridge';
@@ -43,8 +38,16 @@ import {
 } from './editor/notebookEval';
 import { bindingNamesInCell as resolveNotebookBindingNames } from './editor/notebookBindings';
 import { materializeIdeCellPlaceholders } from './editor/ideSession';
+import { DEFAULT_NOTEBOOK_DECISION_CELL_LINES } from './editor/defaultNotebookDecisionCell.mjs';
 import { DEFAULT_NOTEBOOK_SIM_CELL_LINES } from './editor/defaultNotebookSimCell.mjs';
+import defaultMarketSource from '../lib/verdict/Market.verdict?raw';
 import { extractDocs, gasFromBytecode, renderCallGraph, type GasInfo } from './editor/vizGraph';
+import {
+  collapsedDefKey,
+  mappedCellForLine,
+  notebookCellsToVizModules,
+  type VizNotebookCell,
+} from './editor/vizCells';
 
 declare global {
   interface Window {
@@ -54,35 +57,35 @@ declare global {
   }
 }
 
-// Wire up Monaco's base editor worker via Vite's native `?worker` import.
-// Without this, Monaco requests a worker from an undefined URL (the
-// `:5173/undefined` error) and falls back to slow main-thread parsing.
-//
-// We deliberately do NOT load the JSON language-service worker: the bytecode
-// panel is read-only and only needs syntax colours, not validation/IntelliSense.
-// In dev that worker's module graph is ~210 unbundled ESM files (several seconds
-// of round-trips on a cold load), so the bytecode panel uses a tiny custom
-// Monarch tokenizer instead — zero workers. The `verdict` language is likewise
-// custom and worker-free, so the base editor worker is all we need.
-// @ts-ignore - Vite ?worker imports have no type declarations
-import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
-
-(self as any).MonacoEnvironment = {
-  getWorker() {
-    return new EditorWorker();
-  },
-};
-
-// Shared monospace stack for every Monaco surface in the app.
+// Shared monospace stack for every editor surface in the app.
 const FONT_MONO = "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
 
-function notebookSeedFromCells(cells: string[]): string {
-  const joined = cells.map((s) => s.trim()).filter(Boolean).join('\n\n');
+/** Bump when default notebook cells change so stale localStorage is not reused. */
+const VNB_FORMAT_VERSION = 3;
+
+type NotebookSeedCell = {
+  source: string;
+  kind?: 'code' | 'wysiwyg';
+  role?: 'runnable' | 'module' | 'asset' | 'note';
+  path?: string;
+  moduleName?: string;
+};
+
+function notebookSeedFromCells(cells: Array<string | NotebookSeedCell>): string {
+  const normalized = cells.map((cell) => typeof cell === 'string' ? { source: cell } : cell);
+  const joined = normalized.map((c) => c.source.trim()).filter(Boolean).join('\n\n');
   let h = 5381;
   for (let i = 0; i < joined.length; i++) h = ((h << 5) + h + joined.charCodeAt(i)) | 0;
   return JSON.stringify({
+    formatVersion: VNB_FORMAT_VERSION,
     seedSig: `${joined.length}:${h >>> 0}`,
-    cells: cells.map((source) => ({ source })),
+    cells: normalized.map((cell) => ({
+      kind: cell.kind ?? 'code',
+      role: cell.role,
+      path: cell.path,
+      moduleName: cell.moduleName,
+      source: cell.source,
+    })),
   });
 }
 
@@ -105,51 +108,6 @@ function sectionHeader(label: string, hint?: string): HTMLDivElement {
     el.appendChild(h);
   }
   return el;
-}
-
-// The Verdict brand editor theme: a deep navy canvas with a violet accent,
-// teal types, amber strings — tuned to read crisply against the slate chrome.
-let themeDefined = false;
-function defineVerdictTheme() {
-  if (themeDefined) return;
-  themeDefined = true;
-  monaco.editor.defineTheme('verdict-dark', {
-    base: 'vs-dark',
-    inherit: true,
-    rules: [
-      { token: 'keyword', foreground: 'a78bfa', fontStyle: 'bold' }, // violet-400
-      { token: 'type.identifier', foreground: '5eead4' },            // teal-300
-      { token: 'type', foreground: '5eead4' },
-      { token: 'string', foreground: 'fcd34d' },                     // amber-300
-      { token: 'string.quote', foreground: 'fcd34d' },
-      { token: 'string.escape', foreground: 'fbbf24' },
-      { token: 'number', foreground: 'f0abfc' },                     // fuchsia-300
-      { token: 'number.float', foreground: 'f0abfc' },
-      { token: 'comment', foreground: '7c8596' },
-      { token: 'operator', foreground: '93c5fd' },                   // blue-300
-      { token: 'delimiter', foreground: '94a3b8' },
-      { token: 'identifier', foreground: 'e2e8f0' },
-    ],
-    colors: {
-      'editor.background': '#0b0f1a',
-      'editor.foreground': '#e2e8f0',
-      'editorLineNumber.foreground': '#334155',
-      'editorLineNumber.activeForeground': '#a78bfa',
-      'editor.lineHighlightBackground': '#121829',
-      'editor.lineHighlightBorder': '#00000000',
-      'editor.selectionBackground': '#3730a3aa',
-      'editorCursor.foreground': '#a78bfa',
-      'editorIndentGuide.background1': '#1e293b',
-      'editorIndentGuide.activeBackground1': '#334155',
-      'editorWhitespace.foreground': '#1e293b',
-      'editorGutter.background': '#0b0f1a',
-      'editorError.foreground': '#fb7185',
-      'editorBracketMatch.background': '#3730a366',
-      'editorBracketMatch.border': '#a78bfa',
-      'scrollbarSlider.background': '#1e293bcc',
-      'scrollbarSlider.hoverBackground': '#334155',
-    },
-  });
 }
 
 // The Verdict compiler/runtime (verdict.mjs) plus the FinVM browser runtime
@@ -234,8 +192,7 @@ function loadAstLib(): Promise<void> {
   return astLibPromise;
 }
 
-// A structured diagnostic from the Verdict compiler. Positions are 1-based,
-// matching Monaco, so they map across directly.
+// Compiler diagnostics use 1-based line/column positions.
 interface VerdictDiagnostic {
   line: number;
   column: number;
@@ -257,163 +214,23 @@ interface VerdictBindingResult {
   error: string;
 }
 
-function defineVerdict() {
-  monaco.languages.register({ id: 'verdict' });
-
-  monaco.languages.setMonarchTokensProvider('verdict', {
-    keywords: [
-      'module', 'exposing', 'if', 'then', 'else', 'let', 'in', 'switch', 'match', 'type', 'import'
-    ],
-    typeKeywords: [
-      'Int', 'Fixed', 'Rational', 'Bool', 'String', 'Unit', 'Pid', 'Json', 'List', 'Option', 'Result', 'Decoder', 'Encoder', 'Some', 'None', 'Ok', 'Err'
-    ],
-    operators: [
-      '+', '-', '*', '/', '==', '<', '>', '=', '->', '%'
-    ],
-    symbols: /[=><!~?:&|+\-*\/\^%]+/,
-    escapes: /\\(?:[abfnrtv\\"']|x[0-9A-Fa-f]{1,4}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})/,
-    tokenizer: {
-      root: [
-        [/[a-z_$][\w$]*/, { cases: { '@keywords': 'keyword', '@default': 'identifier' } }],
-        [/[A-Z][\w\$]*/, 'type.identifier'],
-        { include: '@whitespace' },
-        [/[{}()\[\]]/, '@brackets'],
-        [/@symbols/, { cases: { '@operators': 'operator', '@default': '' } }],
-        [/\d+\.\d+/, 'number.float'],
-        [/\d+/, 'number'],
-        [/"([^"\\]|\\.)*$/, 'string.invalid'],
-        [/"/, { token: 'string.quote', bracket: '@open', next: '@string' }]
-      ],
-      string: [
-        [/[^\\"]+/, 'string'],
-        [/@escapes/, 'string.escape'],
-        [/\\./, 'string.escape.invalid'],
-        [/"/, { token: 'string.quote', bracket: '@close', next: '@pop' }]
-      ],
-      whitespace: [
-        [/[ \t\r\n]+/, 'white'],
-        [/--.*$/, 'comment'],
-        [/\/\/.*$/, 'comment']
-      ]
-    }
-  });
-
-  monaco.languages.registerCompletionItemProvider('verdict', {
-    provideCompletionItems: (model, position) => {
-      const suggestions: monaco.languages.CompletionItem[] = [
-        ...['module', 'exposing', 'if', 'then', 'else', 'let', 'in', 'switch', 'match', 'type', 'import'].map(k => ({
-          label: k,
-          kind: monaco.languages.CompletionItemKind.Keyword,
-          insertText: k,
-          range: {
-            startLineNumber: position.lineNumber,
-            endLineNumber: position.lineNumber,
-            startColumn: position.column - 1,
-            endColumn: position.column
-          }
-        })),
-        ...['Int', 'Fixed', 'Rational', 'Bool', 'String', 'Unit', 'Pid', 'Json', 'List', 'Option', 'Result', 'Decoder', 'Encoder'].map(t => ({
-          label: t,
-          kind: monaco.languages.CompletionItemKind.Struct,
-          insertText: t,
-          range: {
-            startLineNumber: position.lineNumber,
-            endLineNumber: position.lineNumber,
-            startColumn: position.column - 1,
-            endColumn: position.column
-          }
-        })),
-        ...[
-          'mod', 'length', 'get', 'append', 'spawn', 'send', 'recv', 'yield', 'self',
-          'and', 'or', 'not', 'modPow', 'modInv', 'max', 'min', 'abs', 'clamp', 'gcd', 'lcm', 'pow', 'sqrtFloor',
-          'map', 'filter', 'foldl', 'isEmpty', 'range', 'reverse', 'concat', 'sum', 'product', 'contains', 'take', 'drop', 'all', 'any', 'count', 'find', 'flatMap', 'replicate', 'head', 'last',
-          'mapOption', 'isNone', 'andThen', 'orElse', 'withDefault', 'isSome', 'isOk', 'okOr', 'mapResult',
-          'strLength', 'strConcat', 'strSlice', 'indexOf', 'strContains', 'split', 'toUpper', 'toLower', 'trim', 'fromInt', 'replace', 'parseInt',
-          'regexTest', 'regexFindAll', 'regexReplace', 'regexSplit',
-          'httpGet', 'httpPost', 'sysLog', 'sysCwd', 'sysReadText', 'sysWriteText', 'sysEnv',
-          'dbInsert', 'dbGet', 'dbGetOpt', 'dbUpdate', 'dbDelete', 'dbQuery', 'dbCreateIndex', 'dbHash',
-          'cacheSet', 'cacheGet', 'cacheDelete',
-          'sortInts', 'distinctInts', 'sumIntsFast', 'averageFloor', 'statsMin', 'statsMax', 'meanFloor', 'median', 'percentileNearest', 'varianceFloor', 'stddevFloor', 'describeInts', 'valueCountsInts', 'rollingSumInts'
-        ].map(f => ({
-          label: f,
-          kind: monaco.languages.CompletionItemKind.Function,
-          insertText: f + '($1)' ,
-          insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-          range: {
-            startLineNumber: position.lineNumber,
-            endLineNumber: position.lineNumber,
-            startColumn: position.column - 1,
-            endColumn: position.column
-          }
-        }))
-      ];
-      return { suggestions };
-    }
-  });
-
-  // A worker-free JSON highlighter for the read-only bytecode panel. Monaco's
-  // built-in `json` language pulls in a heavy language-service worker we don't
-  // need; this Monarch grammar gives the same colours with zero workers.
-  monaco.languages.register({ id: 'finvm-bytecode' });
-  monaco.languages.setMonarchTokensProvider('finvm-bytecode', {
-    tokenizer: {
-      root: [
-        [/"(?:[^"\\]|\\.)*"(?=\s*:)/, 'type'],         // object keys
-        [/"(?:[^"\\]|\\.)*"/, 'string'],               // string values
-        [/\b(?:true|false|null)\b/, 'keyword'],
-        [/-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?/, 'number'],
-        [/[{}[\]]/, '@brackets'],
-        [/[,:]/, 'delimiter'],
-      ],
-    },
-  });
-
-  // Type-on-hover: show `name : Type` for the identifier under the cursor.
-  // Signatures are recomputed from the live source on each hover (parse-only,
-  // so it works even while the body has type errors). User definitions are
-  // listed after the prelude, so a later entry wins and shadows built-ins.
-  monaco.languages.registerHoverProvider('verdict', {
-    provideHover: (model, position) => {
-      const word = model.getWordAtPosition(position);
-      if (!word || !vlib) return null;
-
-      let signatures: VerdictSignature[];
-      try {
-        signatures = vlib.signaturesJS(model.getValue());
-      } catch {
-        return null;
-      }
-
-      let signature: string | null = null;
-      for (const s of signatures) {
-        if (s.name === word.word) signature = s.signature;
-      }
-      if (signature === null) return null;
-
-      return {
-        range: new monaco.Range(
-          position.lineNumber, word.startColumn,
-          position.lineNumber, word.endColumn
-        ),
-        contents: [
-          { value: '```verdict\n' + word.word + ' : ' + signature + '\n```' },
-        ],
-      };
-    }
-  });
-}
+type VerdictCmHandle = {
+  destroy(): void;
+  getValue(): string;
+  setValue(text: string): void;
+  focus(): void;
+  layout(): void;
+  refreshLanguageService(): void;
+  revealLine(line: number): void;
+};
 
 class VerdictEditorElement extends HTMLElement {
-  private activeSideTab: 'output' | 'cells' | 'inputs' = 'output';
-  // The whole-program Output tab is only shown in source mode (notebook cells
-  // render their output below themselves; there is no global output panel).
-  private showOutputTab = false;
+  private activeSideTab: 'cells' | 'inputs' = 'cells';
   private activeMainTab: 'editor' | 'db' | 'debug' | 'visual' = 'editor';
-  private editor: monaco.editor.IStandaloneCodeEditor | null = null;
-  private bytecodeEditor: monaco.editor.IStandaloneCodeEditor | null = null;
+  private editor: VerdictCmHandle | null = null;
+  private bytecodeEditor: VerdictCmHandle | null = null;
   private container!: HTMLDivElement;
-  private outputPanel!: HTMLDivElement;
-  private notebookGlobalOutputHost!: HTMLDivElement;
+  /** Source-mode run results (below the shell editor — not a side tab). */
   private programOutputHost!: HTMLDivElement;
   private cellsPanel: HTMLDivElement | null = null;
   private cellsNavHost: HTMLDivElement | null = null;
@@ -434,6 +251,7 @@ class VerdictEditorElement extends HTMLElement {
   private vizListenersAttached = false;
   private vizCleanup: (() => void) | null = null;
   private collapsedDefs = new Set<string>();
+  private collapsedVizModules = new Set<string>();
   private vizMode: 'blocks' | 'map' = 'blocks';
   private inputsPreview: HTMLDivElement | null = null;
   private inputsList: HTMLDivElement | null = null;
@@ -455,11 +273,27 @@ class VerdictEditorElement extends HTMLElement {
   private telegramBotTokenInput: HTMLInputElement | null = null;
   private telegramChatIdInput: HTMLInputElement | null = null;
   private runToggleBtn: HTMLButtonElement | null = null;
+  private liveIntervalInput: HTMLInputElement | null = null;
+  // Live loop: when active, re-run every cell every `liveIntervalMs`. Each tick
+  // runs runProgram() (-> notebookApi.runAll()), which executes every cell
+  // against the shared FinVM session, so cell 1 fetches+strategizes and cell 2
+  // re-simulates on its own. `liveTimer` is the scheduled next tick; `liveBusy`
+  // guards against overlapping ticks when a run takes longer than the interval.
+  private liveTimer: number | null = null;
+  private liveActive = false;
+  private liveBusy = false;
+  private liveIntervalMs = 5000;
   private diagnosticsTimer: number | null = null;
   private busyCount = 0;
   private finvmState: Record<string, unknown> = {};
   private effectStorage: EffectStorage | null = null;
-  private resultDecorations: monaco.editor.IEditorDecorationsCollection | null = null;
+  private languageAnalysisSig = '';
+  private languageAnalysis = {
+    diagnostics: [] as VerdictDiagnostic[],
+    signatures: [] as VerdictSignature[],
+    evalBindings: [] as VerdictBindingResult[],
+    docs: new Map<string, string>(),
+  };
   private latestCompiledProgram: unknown = null;
   private latestVmSnapshot: unknown = null;
   private lastVmSteps = 0;
@@ -486,7 +320,7 @@ class VerdictEditorElement extends HTMLElement {
     if (this.built) return;
     this.built = true;
     // Start fetching the compiler/VM blobs as early as possible, in parallel
-    // with building the DOM and Monaco editor.
+    // with building the DOM and CodeMirror editors.
     loadVerdictLibs();
     this.build();
   }
@@ -550,6 +384,15 @@ class VerdictEditorElement extends HTMLElement {
     leftPane.appendChild(this.notebookHost);
     leftPane.appendChild(this.container);
     this.container.classList.add('hidden');
+
+    this.programOutputHost = document.createElement('div');
+    this.programOutputHost.dataset.programOutput = '1';
+    this.programOutputHost.className =
+      'hidden shrink-0 max-h-44 overflow-auto border-t border-slate-800/80 bg-slate-950 px-4 py-3 font-mono text-sm leading-relaxed';
+    this.programOutputHost.innerHTML =
+      '<div class="text-slate-600 italic">Press Run to compile and execute the whole program.</div>';
+    leftPane.appendChild(this.programOutputHost);
+
     this.dbPanel = document.createElement('div');
     this.dbPanel.className = 'hidden flex-1 min-h-0 overflow-auto bg-[#0b0f1a] p-3';
     const dbWrap = document.createElement('div');
@@ -703,57 +546,50 @@ class VerdictEditorElement extends HTMLElement {
       'inline-flex items-center rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-emerald-200 transition-colors hover:bg-emerald-500/25';
     this.runToggleBtn.textContent = 'Run';
     this.runToggleBtn.onclick = () => {
-      void this.runProgram();
+      this.toggleLiveLoop();
     };
     startStopRow.appendChild(this.runToggleBtn);
 
+    // Live-loop interval (seconds): every tick re-runs all cells. Default 5s.
+    const everyLabel = document.createElement('span');
+    everyLabel.className = 'text-[10px] font-bold uppercase tracking-wider text-slate-500';
+    everyLabel.textContent = 'every';
+    this.liveIntervalInput = document.createElement('input');
+    this.liveIntervalInput.type = 'number';
+    this.liveIntervalInput.min = '1';
+    this.liveIntervalInput.value = '5';
+    this.liveIntervalInput.setAttribute('aria-label', 'Live re-run interval in seconds');
+    this.liveIntervalInput.className =
+      'w-12 rounded border border-slate-700 bg-slate-900 px-1.5 py-1 text-[10px] font-mono text-slate-300 outline-none focus:border-indigo-400';
+    this.liveIntervalInput.oninput = () => this.onLiveIntervalChanged();
+    const secLabel = document.createElement('span');
+    secLabel.className = 'text-[10px] font-bold uppercase tracking-wider text-slate-500';
+    secLabel.textContent = 's';
+    startStopRow.appendChild(everyLabel);
+    startStopRow.appendChild(this.liveIntervalInput);
+    startStopRow.appendChild(secLabel);
+
     const tabBar = document.createElement('div');
     tabBar.className = 'flex items-center gap-1 border-b border-slate-800 bg-slate-950 px-2 py-1.5';
-    const mkTabBtn = (id: 'output' | 'cells' | 'inputs', label: string) => {
+    const mkTabBtn = (id: 'cells' | 'inputs', label: string) => {
       const btn = document.createElement('button');
       btn.className = 'rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wider';
       btn.textContent = label;
+      btn.dataset.tabId = id;
       btn.onclick = () => this.setActiveSideTab(id);
       return btn;
     };
-    const outputTabBtn = mkTabBtn('output', 'Output');
-    const cellsTabBtn = mkTabBtn('cells', 'Cells');
-    const inputsTabBtn = mkTabBtn('inputs', 'Inputs');
-    outputTabBtn.dataset.tabId = 'output';
-    cellsTabBtn.dataset.tabId = 'cells';
-    inputsTabBtn.dataset.tabId = 'inputs';
-    tabBar.appendChild(outputTabBtn);
-    tabBar.appendChild(cellsTabBtn);
-    tabBar.appendChild(inputsTabBtn);
+    tabBar.appendChild(mkTabBtn('cells', 'Cells'));
+    tabBar.appendChild(mkTabBtn('inputs', 'Inputs'));
 
-    this.outputPanel = document.createElement('div');
-    this.outputPanel.className = 'flex flex-1 min-h-0 flex-col overflow-auto bg-[#0b0f1a]';
-
-    // Global output is removed — notebook cells render below themselves. This host
-    // is kept (hidden) only to satisfy existing references.
-    this.notebookGlobalOutputHost = document.createElement('div');
-    this.notebookGlobalOutputHost.dataset.notebookGlobalOutput = '1';
-    this.notebookGlobalOutputHost.className = 'hidden';
-
-    // Cells tab: navigation minimap only (no output) — separate from Output.
     this.cellsPanel = document.createElement('div');
-    this.cellsPanel.className = 'hidden flex-1 min-h-0 overflow-auto bg-[#0b0f1a] p-3';
+    this.cellsPanel.className = 'flex flex-1 min-h-0 overflow-auto bg-[#0b0f1a] p-3';
     this.cellsNavHost = document.createElement('div');
     this.cellsNavHost.dataset.cellsNav = '1';
     this.cellsNavHost.className = 'flex flex-col gap-1.5';
     this.cellsNavHost.innerHTML =
-      '<div class="text-xs italic text-slate-600">Cells appear here for navigation and run/stop.</div>';
+      '<div class="text-xs italic text-slate-600">Per-cell navigation. Inputs and DB are shared across the notebook.</div>';
     this.cellsPanel.appendChild(this.cellsNavHost);
-
-    this.programOutputHost = document.createElement('div');
-    this.programOutputHost.dataset.programOutput = '1';
-    this.programOutputHost.className =
-      'shrink-0 border-t border-slate-800/80 p-4 font-mono text-sm leading-relaxed text-emerald-300';
-    this.programOutputHost.innerHTML =
-      '<div class="text-slate-600 italic">Press Run to compile and execute the whole program.</div>';
-
-    this.outputPanel.appendChild(this.notebookGlobalOutputHost);
-    this.outputPanel.appendChild(this.programOutputHost);
 
     this.inputsPanel = document.createElement('div');
     this.inputsPanel.className = 'hidden flex-1 min-h-0 overflow-auto bg-[#0b0f1a] p-3';
@@ -762,7 +598,7 @@ class VerdictEditorElement extends HTMLElement {
     const inputsHint = document.createElement('div');
     inputsHint.className = 'text-[11px] text-slate-400';
     inputsHint.textContent =
-      'Use __INPUT_key__ placeholders. Cell boundaries live in the notebook document (.vnb), not in Verdict source.';
+      'Notebook-wide inputs — every cell sees the same __INPUT_key__ values when you run. Like DB, inputs are shared; Visual is per cell.';
     const fixedInputs = document.createElement('div');
     fixedInputs.className = 'grid grid-cols-[auto,1fr] gap-x-2 gap-y-2 rounded border border-slate-800 bg-slate-950 p-2';
     const mkLabel = (text: string) => {
@@ -775,44 +611,36 @@ class VerdictEditorElement extends HTMLElement {
     this.symbolInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
     this.symbolInput.value = 'BTCUSD';
     this.symbolInput.setAttribute('aria-label', 'Binance symbol');
-    this.symbolInput.oninput = () => {
-      this.refreshInputsPreview();
-      this.runDiagnostics();
-      this.runInlineResults();
-    };
+    this.symbolInput.oninput = () => this.onRuntimeInputsChanged();
     this.assetsCsvInput = document.createElement('input');
     this.assetsCsvInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
     this.assetsCsvInput.value = 'BTCUSD,ETHUSD,ADAUSD';
     this.assetsCsvInput.setAttribute('aria-label', 'Assets CSV');
-    this.assetsCsvInput.oninput = () => {
-      this.refreshInputsPreview();
-      this.runDiagnostics();
-      this.runInlineResults();
-    };
+    this.assetsCsvInput.oninput = () => this.onRuntimeInputsChanged();
     this.signalThresholdInput = document.createElement('input');
     this.signalThresholdInput.type = 'number';
     this.signalThresholdInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
     this.signalThresholdInput.value = '2';
     this.signalThresholdInput.setAttribute('aria-label', 'Signal threshold');
-    this.signalThresholdInput.oninput = this.assetsCsvInput.oninput;
+    this.signalThresholdInput.oninput = () => this.onRuntimeInputsChanged();
     this.positionBiasInput = document.createElement('input');
     this.positionBiasInput.type = 'number';
     this.positionBiasInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
     this.positionBiasInput.value = '0';
     this.positionBiasInput.setAttribute('aria-label', 'Position bias');
-    this.positionBiasInput.oninput = this.assetsCsvInput.oninput;
+    this.positionBiasInput.oninput = () => this.onRuntimeInputsChanged();
     this.telegramBotTokenInput = document.createElement('input');
     this.telegramBotTokenInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
     this.telegramBotTokenInput.value = '';
     this.telegramBotTokenInput.placeholder = '123456:ABC...';
     this.telegramBotTokenInput.setAttribute('aria-label', 'Telegram bot token');
-    this.telegramBotTokenInput.oninput = this.assetsCsvInput.oninput;
+    this.telegramBotTokenInput.oninput = () => this.onRuntimeInputsChanged();
     this.telegramChatIdInput = document.createElement('input');
     this.telegramChatIdInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
     this.telegramChatIdInput.value = '';
     this.telegramChatIdInput.placeholder = '-100123456789';
     this.telegramChatIdInput.setAttribute('aria-label', 'Telegram chat id');
-    this.telegramChatIdInput.oninput = this.assetsCsvInput.oninput;
+    this.telegramChatIdInput.oninput = () => this.onRuntimeInputsChanged();
     fixedInputs.appendChild(mkLabel('symbol'));
     fixedInputs.appendChild(this.symbolInput);
     fixedInputs.appendChild(mkLabel('assetsCsv'));
@@ -860,9 +688,9 @@ class VerdictEditorElement extends HTMLElement {
     }
     rightPanel.appendChild(startStopRow);
     rightPanel.appendChild(tabBar);
-    rightPanel.appendChild(this.outputPanel);
     rightPanel.appendChild(this.cellsPanel);
     rightPanel.appendChild(this.inputsPanel);
+    this.setActiveSideTab('cells');
 
     const resizeHandle = document.createElement('div');
     resizeHandle.className = 'w-1.5 shrink-0 cursor-col-resize bg-slate-900/70 hover:bg-indigo-500/60 transition-colors';
@@ -874,360 +702,48 @@ class VerdictEditorElement extends HTMLElement {
 
     this.appendChild(this.mainContainer);
 
-    if (!monaco.languages.getLanguages().some(l => l.id === 'verdict')) {
-      defineVerdict();
-    }
-    defineVerdictTheme();
+    this.container.classList.add('verdict-cm-shell-wrap', 'min-h-0', 'flex-1');
 
-    this.bytecodeEditor = monaco.editor.create(bytecodeContainer, {
+    this.bytecodeEditor = createVerdictEditor(bytecodeContainer, {
+      variant: 'bytecode',
       value: '',
-      language: 'finvm-bytecode',
-      theme: 'verdict-dark',
-      readOnly: true,
-      minimap: { enabled: false },
-      automaticLayout: true,
+      editable: false,
       fontSize: 12,
-      fontFamily: FONT_MONO,
-      lineNumbers: 'off',
-      scrollBeyondLastLine: false,
-      renderLineHighlight: 'none',
     });
 
-    const DEFAULT_NOTEBOOK_CELL_1 = [
-        'module Main exposing (main)',
-        '',
-        '-- Market data: fetched from Binance in THIS code via httpGet.',
-        '-- The editor only runs the VM and fulfils http/db/cache effects.',
-        '-- All statistics below are computed in pure Verdict (the bundled runtime',
-        '-- ships str/logic/bigint builtins; the rich stats/series builtins in the',
-        '-- prelude are not linked into this VM, so we derive them from first',
-        '-- principles with foldl + integer math).',
-        '',
-        'binanceSymbol : String -> String',
-        'binanceSymbol sym =',
-        '  if sym == "BTCUSD" then "BTCUSDT"',
-        '  else if sym == "ETHUSD" then "ETHUSDT"',
-        '  else if sym == "ADAUSD" then "ADAUSDT"',
-        '  else sym',
-        '',
-        'binancePriceUrl : String -> String',
-        'binancePriceUrl sym =',
-        '  strConcat("https://api.binance.com/api/v3/ticker/price?symbol=", binanceSymbol(sym))',
-        '',
-        'dollarsToCents : String -> Int',
-        'dollarsToCents px =',
-        '  let parts = split(px, ".") in',
-        '  let whole = withDefault(0, parseInt(withDefault("0", head(parts)))) in',
-        '  let fracRaw = withDefault("0", head(drop(1, parts))) in',
-        '  let frac = strSlice(fracRaw, 0, 2) in',
-        '  let fracPad = if strLength(frac) < 2 then strConcat(frac, "0") else frac in',
-        '  whole * 100 + withDefault(0, parseInt(fracPad))',
-        '',
-        '-- FinVM ships str.* builtins but no json.* builtins, so we pull the quoted',
-        '-- "price" field out of the flat JSON body with string ops.',
-        'jsonStringField : String -> String -> String',
-        'jsonStringField key body =',
-        '  let marker = strConcat("\\"", strConcat(key, "\\":\\"")) in',
-        '  let afterKey = split(body, marker) in',
-        '  if length(afterKey) < 2 then ""',
-        '  else',
-        '    let rest = withDefault("", head(drop(1, afterKey))) in',
-        '    withDefault("", head(split(rest, "\\"")))',
-        '',
-        'priceCentsFromBody : String -> Int',
-        'priceCentsFromBody body = dollarsToCents(jsonStringField("price", body))',
-        '',
-        'fetchPriceCents : String -> Int',
-        'fetchPriceCents sym =',
-        '  let res = httpGet(binancePriceUrl(sym)) in',
-        '  if res.ok then priceCentsFromBody(res.body) else 0',
-        '',
-        'histKey : String -> String',
-        'histKey sym = strConcat("hist:", sym)',
-        '',
-        '-- cacheGet returns unit on a miss; the stored value is the raw CSV string.',
-        'histCsvOrEmpty : String -> String',
-        'histCsvOrEmpty sym =',
-        '  let raw = cacheGet("market", histKey(sym)) in',
-        '  if raw == unit then "" else raw',
-        '',
-        'appendHistCsv : String -> Int -> String',
-        'appendHistCsv csv px =',
-        '  if strLength(csv) == 0 then fromInt(px)',
-        '  else strConcat(csv, strConcat(",", fromInt(px)))',
-        '',
-        'saveHistCsv : String -> String -> Bool',
-        'saveHistCsv sym csv = cacheSet("market", histKey(sym), csv)',
-        '',
-        '-- ── Series parsing & windowing ──────────────────────────────────────────────',
-        'pushParsed : List Int -> String -> List Int',
-        'pushParsed acc s = append(acc, withDefault(0, parseInt(trim(s))))',
-        '',
-        'parseCsvInts : String -> List Int',
-        'parseCsvInts csv = foldl(pushParsed, [], split(csv, ","))',
-        '',
-        'lastN : Int -> List Int -> List Int',
-        'lastN n xs =',
-        '  let len = length(xs) in',
-        '  let dropN = if len > n then len - n else 0 in',
-        '  drop(dropN, xs)',
-        '',
-        'lastInt : List Int -> Int',
-        'lastInt xs = withDefault(0, last(xs))',
-        '',
-        'listMin : List Int -> Int',
-        'listMin xs = foldl(min, withDefault(0, head(xs)), xs)',
-        '',
-        'listMax : List Int -> Int',
-        'listMax xs = foldl(max, withDefault(0, head(xs)), xs)',
-        '',
-        '-- ── Integer square root (Newton\'s method, pure Verdict) ─────────────────────',
-        'isqrtGo : Int -> Int -> Int',
-        'isqrtGo n x =',
-        '  let y = (x + n / x) / 2 in',
-        '  if y < x then isqrtGo(n, y) else x',
-        '',
-        'isqrt : Int -> Int',
-        'isqrt n =',
-        '  if n < 2 then (if n < 0 then 0 else n)',
-        '  else isqrtGo(n, n / 2)',
-        '',
-        '-- ── Mean / variance / standard deviation (single-pass accumulator) ──────────',
-        'accStat : { n : Int, s : Int, ss : Int } -> Int -> { n : Int, s : Int, ss : Int }',
-        'accStat a x = { n = a.n + 1, s = a.s + x, ss = a.ss + x * x }',
-        '',
-        'statsOf : List Int -> { n : Int, s : Int, ss : Int }',
-        'statsOf xs = foldl(accStat, { n = 0, s = 0, ss = 0 }, xs)',
-        '',
-        'meanOf : List Int -> Int',
-        'meanOf xs =',
-        '  let st = statsOf(xs) in',
-        '  if st.n == 0 then 0 else st.s / st.n',
-        '',
-        '-- Population variance: E[x^2] - E[x]^2, clamped at 0 against rounding.',
-        'varianceOf : List Int -> Int',
-        'varianceOf xs =',
-        '  let st = statsOf(xs) in',
-        '  if st.n == 0 then 0',
-        '  else',
-        '    let m = st.s / st.n in',
-        '    let v = st.ss / st.n - m * m in',
-        '    if v < 0 then 0 else v',
-        '',
-        'stddevOf : List Int -> Int',
-        'stddevOf xs = isqrt(varianceOf(xs))',
-        '',
-        '-- z-score in centi-sigma: (price - mean) * 100 / stddev',
-        'zScoreOf : List Int -> Int',
-        'zScoreOf xs =',
-        '  let sd = stddevOf(xs) in',
-        '  if sd == 0 then 0',
-        '  else (lastInt(xs) - meanOf(xs)) * 100 / sd',
-        '',
-        '-- ── Exponential moving average (alpha = 2 / (period + 1)) ───────────────────',
-        'emaAcc : { p : Int, e : Int, seen : Int } -> Int -> { p : Int, e : Int, seen : Int }',
-        'emaAcc a x =',
-        '  if a.seen == 0 then { p = a.p, e = x, seen = 1 }',
-        '  else { p = a.p, e = (x * 2 + a.e * (a.p - 1)) / (a.p + 1), seen = a.seen + 1 }',
-        '',
-        'emaOf : Int -> List Int -> Int',
-        'emaOf period xs =',
-        '  let r = foldl(emaAcc, { p = period, e = 0, seen = 0 }, xs) in',
-        '  r.e',
-        '',
-        '-- ── Linear-regression slope over the window (least squares, cents/step) ─────',
-        'regAcc : { i : Int, sx : Int, sy : Int, sxy : Int, sxx : Int } -> Int -> { i : Int, sx : Int, sy : Int, sxy : Int, sxx : Int }',
-        'regAcc a y =',
-        '  { i = a.i + 1, sx = a.sx + a.i, sy = a.sy + y, sxy = a.sxy + a.i * y, sxx = a.sxx + a.i * a.i }',
-        '',
-        'slopeOf : List Int -> Int',
-        'slopeOf xs =',
-        '  let n = length(xs) in',
-        '  if n < 2 then 0',
-        '  else',
-        '    let r = foldl(regAcc, { i = 0, sx = 0, sy = 0, sxy = 0, sxx = 0 }, xs) in',
-        '    let denom = n * r.sxx - r.sx * r.sx in',
-        '    if denom == 0 then 0 else (n * r.sxy - r.sx * r.sy) / denom',
-        '',
-        '-- range position: where the last price sits within [min,max], as percent 0..100',
-        'rangePosOf : List Int -> Int',
-        'rangePosOf xs =',
-        '  let lo = listMin(xs) in',
-        '  let hi = listMax(xs) in',
-        '  if hi == lo then 50 else (lastInt(xs) - lo) * 100 / (hi - lo)',
-        '',
-        'momentumOf : List Int -> Int',
-        'momentumOf xs =',
-        '  let n = length(xs) in',
-        '  if n < 2 then 0 else lastInt(xs) - xs[n - 2]',
-        '',
-        '-- ── Reporting helpers (str.* only; no json.*) ───────────────────────────────',
-        'appendStr : String -> String -> String',
-        'appendStr acc s = strConcat(acc, s)',
-        '',
-        'joinStr : List String -> String',
-        'joinStr parts = foldl(appendStr, "", parts)',
-        '',
-        '-- Render integer cents as a human dollars string, e.g. 1234567 -> 12345.67',
-        'centsToUsd : Int -> String',
-        'centsToUsd c =',
-        '  let whole = c / 100 in',
-        '  let frac = c - whole * 100 in',
-        '  let fracStr = if frac < 10 then strConcat("0", fromInt(frac)) else fromInt(frac) in',
-        '  strConcat(fromInt(whole), strConcat(".", fracStr))',
-        '',
-        '-- Render a signed hundredths value (z-score sigma) like -1.50 / 2.30',
-        'signedCentis : Int -> String',
-        'signedCentis c =',
-        '  if c < 0 then strConcat("-", centsToUsd(0 - c)) else centsToUsd(c)',
-        '',
-        '-- ── Signal scoring: blends trend, mean-reversion and momentum ───────────────',
-        'scoreOf : Int -> Int -> Int -> Int -> Int -> Int -> Int',
-        'scoreOf z emaFast emaSlow slope mom bias =',
-        '  let cross = emaFast - emaSlow in',
-        '  let trend = if cross > 0 then 2 else if cross < 0 then (0 - 2) else 0 in',
-        '  let slopeSig = if slope > 0 then 1 else if slope < 0 then (0 - 1) else 0 in',
-        '  let revert = if z < (0 - 150) then 2 else if z > 150 then (0 - 2) else 0 in',
-        '  let accel = if mom > 0 then 1 else if mom < 0 then (0 - 1) else 0 in',
-        '  trend + slopeSig + revert + accel + bias',
-        '',
-        'decisionFromScore : Int -> Int -> String',
-        'decisionFromScore s threshold =',
-        '  if s > threshold then "BUY"',
-        '  else if s == threshold then "BUY"',
-        '  else if s < (0 - threshold) then "SELL"',
-        '  else if s == (0 - threshold) then "SELL"',
-        '  else "HOLD"',
-        '',
-        'notifyTelegram : String -> String -> String -> String',
-        'notifyTelegram token chatId text =',
-        '  if strLength(token) < 10 then "telegram:skip(no token)"',
-        '  else if strLength(chatId) < 3 then "telegram:skip(no chat)"',
-        '  else httpPost(',
-        '    strConcat("https://api.telegram.org/bot", strConcat(token, "/sendMessage")),',
-        '    text',
-        '  ).body',
-        '',
-        '-- Compute every statistic for one asset window and fold into a decision row.',
-        'decisionForAsset : Int -> Int -> String -> List Int -> Json',
-        'decisionForAsset threshold bias sym window =',
-        '  let px = lastInt(window) in',
-        '  let mean = meanOf(window) in',
-        '  let sd = stddevOf(window) in',
-        '  let z = zScoreOf(window) in',
-        '  let emaFast = emaOf(5, window) in',
-        '  let emaSlow = emaOf(20, window) in',
-        '  let slope = slopeOf(window) in',
-        '  let rangePos = rangePosOf(window) in',
-        '  let mom = momentumOf(window) in',
-        '  let sc = scoreOf(z, emaFast, emaSlow, slope, mom, bias) in',
-        '  let d = decisionFromScore(sc, threshold) in',
-        '  { symbol = sym, decision = d, score = sc, priceCents = px,',
-        '    mean = mean, stddev = sd, zscore = z, emaFast = emaFast, emaSlow = emaSlow,',
-        '    slope = slope, rangePos = rangePos, momentum = mom, samples = length(window) }',
-        '',
-        '-- Human-readable justification for a decision, comparing score vs threshold.',
-        'explainDecision : Int -> Int -> String -> String',
-        'explainDecision s threshold d =',
-        '  if d == "BUY" then joinStr(["score ", fromInt(s), " >= threshold ", fromInt(threshold), " => BUY"])',
-        '  else if d == "SELL" then joinStr(["score ", fromInt(s), " <= -threshold ", fromInt(threshold), " => SELL"])',
-        '  else joinStr(["score ", fromInt(s), " within +/-", fromInt(threshold), " => HOLD"])',
-        '',
-        '-- Build the multi-line detail block shown in Output, one per asset. The editor',
-        '-- only prints whatever this returns; all reasoning lives here.',
-        'assetDetail : Json -> Int -> String -> String -> String',
-        'assetDetail row threshold savedId alertStatus =',
-        '  joinStr([',
-        '    "* ", row.symbol, "  ", row.decision,',
-        '    "\\n    price      $", centsToUsd(row.priceCents),',
-        '    "\\n    samples    ", fromInt(row.samples),',
-        '    "\\n    mean       $", centsToUsd(row.mean),',
-        '    "\\n    std dev    $", centsToUsd(row.stddev),',
-        '    "\\n    z-score    ", signedCentis(row.zscore), " sigma",',
-        '    "\\n    EMA(5)     $", centsToUsd(row.emaFast),',
-        '    "\\n    EMA(20)    $", centsToUsd(row.emaSlow),',
-        '    "\\n    slope      ", fromInt(row.slope), " cents/step",',
-        '    "\\n    range pos  ", fromInt(row.rangePos), "% of [lo,hi]",',
-        '    "\\n    momentum   ", fromInt(row.momentum), " cents",',
-        '    "\\n    score      ", fromInt(row.score), "  (threshold ", fromInt(threshold), ")",',
-        '    "\\n    decision   ", row.decision, "  =>  ", explainDecision(row.score, threshold, row.decision),',
-        '    "\\n    saved      signals#", savedId,',
-        '    "\\n    alert      ", alertStatus',
-        '  ])',
-        '',
-        'persistSignal : Json -> String',
-        'persistSignal row = dbInsert("signals", row)',
-        '',
-        'isActionable : Json -> Bool',
-        'isActionable row =',
-        '  if row.decision == "BUY" then True',
-        '  else if row.decision == "SELL" then True',
-        '  else False',
-        '',
-        'tickOneAsset : String -> String -> String',
-        'tickOneAsset acc sym =',
-        '  let trimmed = trim(sym) in',
-        '  if strLength(trimmed) == 0 then acc',
-        '  else',
-        '    let prevCsv = histCsvOrEmpty(trimmed) in',
-        '    let px = fetchPriceCents(trimmed) in',
-        '    let csv = appendHistCsv(prevCsv, px) in',
-        '    let _save = saveHistCsv(trimmed, csv) in',
-        '    let window = lastN(20, parseCsvInts(csv)) in',
-        '    let threshold = __INPUT_signalThreshold__ in',
-        '    let bias = __INPUT_positionBias__ in',
-        '    let bot = __INPUT_telegramBotToken__ in',
-        '    let chat = __INPUT_telegramChatId__ in',
-        '    let row = decisionForAsset(threshold, bias, trimmed, window) in',
-        '    let savedId = persistSignal(row) in',
-        '    let shouldNotify = isActionable(row) in',
-        '    let alertText = joinStr([trimmed, " ", row.decision, " @ $", centsToUsd(px)]) in',
-        '    let alertStatus =',
-        '      if shouldNotify then strConcat("sent -> ", notifyTelegram(bot, chat, alertText))',
-        '      else "skipped (HOLD, not actionable)" in',
-        '    let detail = assetDetail(row, threshold, savedId, alertStatus) in',
-        '    if strLength(acc) == 0 then detail else strConcat(acc, strConcat("\\n\\n", detail))',
-        '',
-        'main : String',
-        'main =',
-        '  let assets = split(__INPUT_assetsCsv__, ",") in',
-        '  let body = foldl(tickOneAsset, "", assets) in',
-        '  if strLength(body) == 0 then "No assets to evaluate."',
-        '  else strConcat("=== Verdict tick: statistical multi-asset decisions ===\\n\\n", body)',
-      ];
     const DEFAULT_NOTEBOOK_CELL_2 = DEFAULT_NOTEBOOK_SIM_CELL_LINES;
     const defaultNotebookCells = [
-      DEFAULT_NOTEBOOK_CELL_1.join('\n'),
-      DEFAULT_NOTEBOOK_CELL_2.join('\n'),
+      {
+        source: defaultMarketSource.trim(),
+        kind: 'code' as const,
+        role: 'module' as const,
+        path: 'Market.verdict',
+        moduleName: 'Market',
+      },
+      {
+        source: DEFAULT_NOTEBOOK_DECISION_CELL_LINES.join('\n'),
+        kind: 'code' as const,
+        role: 'runnable' as const,
+        path: 'Main.verdict',
+        moduleName: 'Main',
+      },
+      {
+        source: DEFAULT_NOTEBOOK_CELL_2.join('\n'),
+        kind: 'code' as const,
+        role: 'runnable' as const,
+        path: 'Backtest.verdict',
+        moduleName: 'Backtest',
+      },
     ];
     this.defaultNotebookSeed = notebookSeedFromCells(defaultNotebookCells);
 
-    this.editor = monaco.editor.create(this.container, {
-      value: defaultNotebookCells.join('\n\n'),
-      language: 'verdict',
-      theme: 'verdict-dark',
-      automaticLayout: true,
-      minimap: { enabled: false },
-      fontSize: 14,
-      fontFamily: FONT_MONO,
-      fontLigatures: true,
-      lineHeight: 22,
-      smoothScrolling: true,
-      cursorBlinking: 'smooth',
-      roundedSelection: true,
-      padding: { top: 18, bottom: 18 },
-      scrollBeyondLastLine: false,
-      scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
+    this.editor = createVerdictEditor(this.container, {
+      variant: 'program',
+      value: defaultNotebookCells.map((cell) => cell.source).join('\n\n'),
+      languageService: this.programLanguageService(),
+      onRun: () => this.run(),
+      onChange: () => this.scheduleUpdate(),
     });
-
-    // One-shot run on Cmd/Ctrl+Enter.
-    this.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => this.run());
-
-    this.resultDecorations = this.editor.createDecorationsCollection();
-
-    // Live feedback: re-check + re-evaluate on every edit, debounced so we don't
-    // compile on each keystroke, plus one immediate pass for the starting program.
-    this.editor.onDidChangeModelContent(() => this.scheduleUpdate());
 
     // The first diagnostics/results pass needs the compiler — wait for it, then
     // run. (runDiagnostics/runInlineResults no-op until vlib is set anyway.)
@@ -1241,10 +757,6 @@ class VerdictEditorElement extends HTMLElement {
     this.refreshInputsPreview();
     this.refreshDbQueryOutput();
     this.setActiveMainTab(this.isDebugView() ? 'debug' : 'editor');
-    // Notebook view by default: Cells (navigation) tab; the whole-program Output
-    // tab only appears in source mode.
-    this.setOutputTabVisible(false);
-    this.setActiveSideTab('cells');
     await this.initNotebook();
     this.updateWorkspaceChrome();
     this.runDiagnostics();
@@ -1252,18 +764,18 @@ class VerdictEditorElement extends HTMLElement {
   }
 
   private getProgramSource(): string {
+    if (this.notebookSourceMode && this.editor) {
+      return this.editor.getValue();
+    }
     if (this.notebookApi) return this.notebookApi.notebookSource();
     return this.editor?.getValue() ?? '';
   }
 
-  private getVisualizationSource(): string {
-    if (this.notebookApi?.notebookDocumentSource) {
-      return this.notebookApi.notebookDocumentSource();
-    }
-    return this.getProgramSource();
-  }
-
   private onNotebookProgramChanged(source: string) {
+    if (this.notebookApi?.getViewMode?.() === 'notebook') {
+      this.markVizDirty();
+      return;
+    }
     if (this.editor && !this.syncingNotebook) {
       this.syncingNotebook = true;
       try {
@@ -1285,10 +797,10 @@ class VerdictEditorElement extends HTMLElement {
         vlib,
         materialize: (source) => this.materializeInputs(source),
         onProgramChanged: (source) => this.onNotebookProgramChanged(source),
-        syncGlobalOutput: (sections) => this.syncNotebookGlobalOutput(sections),
-        evalCells: (source, names, opts) => {
+        syncCellsNav: (sections) => this.syncNotebookCellsNav(sections),
+        evalCells: async (source, names, opts) => {
           if (!vlib || !finvmLib) return [];
-          return evalNotebookCells(
+          const outs = await evalNotebookCells(
             {
               vlib,
               finvm: finvmLib as FinVmModule,
@@ -1301,23 +813,26 @@ class VerdictEditorElement extends HTMLElement {
                 this.effectStorage = s;
               },
               materialize: (s, cell) =>
-                materializeIdeCellPlaceholders(this.materializeInputs(s), cell),
+                materializeIdeCellPlaceholders(this.materializeInputs(s), cell, this.finvmState),
             },
             source,
             names,
-            opts?.cellId != null || opts?.cellIndex != null
-              ? { cell: { id: opts.cellId, index: opts.cellIndex } }
+            opts?.cellId != null || opts?.cellIndex != null || opts?.signal
+              ? { cell: { id: opts?.cellId, index: opts?.cellIndex }, signal: opts?.signal }
               : undefined,
           );
+          // Notebook cells run on the shared FinVM session; reflect it in Debug/DB
+          // (only when those tabs are open, to avoid serializing state every tick).
+          if (this.activeMainTab === 'debug') this.renderVmState(this.finvmState);
+          if (this.activeMainTab === 'db') this.refreshDbQueryOutput();
+          return outs;
         },
         setSourceMode: (on) => {
           this.notebookSourceMode = on;
-          // The Output (whole-program) tab is only relevant while editing source.
-          this.setOutputTabVisible(on);
-          this.setActiveSideTab(on ? 'output' : 'cells');
           if (!this.notebookHost || !this.container) return;
           this.notebookHost.classList.toggle('hidden', on);
           this.container.classList.toggle('hidden', !on);
+          this.programOutputHost.classList.toggle('hidden', !on);
           if (on) {
             this.editor?.setValue(this.getProgramSource());
             this.editor?.layout();
@@ -1367,20 +882,13 @@ class VerdictEditorElement extends HTMLElement {
     }
   }
 
-  /**
-   * Render the notebook's right-side panels. Navigation and output are SEPARATE
-   * tabs: the Cells tab is a navigation minimap (run/stop + status, no output),
-   * the Output tab shows results from cells routed to global output. Cells routed
-   * to local output render under the cell in the body instead.
-   */
-  private async syncNotebookGlobalOutput(sections: GlobalOutputSection[]) {
-    // Global output is removed — every cell renders its output below itself in
-    // the body. The right panel only hosts the Cells navigation minimap.
+  /** Notebook cell navigation minimap (right panel). Output renders under each cell. */
+  private syncNotebookCellsNav(sections: CellsNavSection[]) {
     this.renderCellsNav(sections);
   }
 
-  /** Cells tab: navigation minimap only — number, preview, run/stop, status. */
-  private renderCellsNav(sections: GlobalOutputSection[]) {
+  /** Cells tab: navigation minimap — number, preview, run/stop, status. */
+  private renderCellsNav(sections: CellsNavSection[]) {
     const host = this.cellsNavHost;
     if (!host) return;
     host.innerHTML = '';
@@ -1390,6 +898,7 @@ class VerdictEditorElement extends HTMLElement {
     }
     for (const sec of sections) {
       const isText = sec.kind === 'text';
+      const isRunnable = sec.kind === 'code';
       const card = document.createElement('div');
       card.dataset.navCell = sec.cellId;
       card.className =
@@ -1400,11 +909,15 @@ class VerdictEditorElement extends HTMLElement {
       navBtn.type = 'button';
       navBtn.className = 'flex min-w-0 flex-1 flex-col gap-0.5 text-left';
       navBtn.title = 'Jump to this cell';
-      navBtn.onclick = () => this.notebookApi?.focusCellById?.(sec.cellId);
+      navBtn.onclick = () => {
+        if (this.activeMainTab === 'visual' && this.revealVisualCell(sec.cellId)) return;
+        this.notebookApi?.focusCellById?.(sec.cellId);
+      };
       const meta = document.createElement('div');
       meta.className = 'flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500';
       const num = document.createElement('span');
-      num.textContent = `${sec.cellIndex + 1} · ${isText ? 'Text' : 'Code'}`;
+      const label = sec.kind === 'module' ? 'Module' : isText ? 'Text' : sec.kind === 'asset' ? 'Asset' : 'Runnable';
+      num.textContent = `${sec.cellIndex + 1} · ${label}`;
       meta.appendChild(num);
       const prev = document.createElement('div');
       prev.className = 'truncate font-mono text-[11px] text-slate-300';
@@ -1413,7 +926,7 @@ class VerdictEditorElement extends HTMLElement {
       navBtn.appendChild(prev);
       card.appendChild(navBtn);
 
-      if (!isText) {
+      if (isRunnable) {
         const runBtn = document.createElement('button');
         runBtn.type = 'button';
         runBtn.dataset.runCell = sec.cellId;
@@ -1442,77 +955,9 @@ class VerdictEditorElement extends HTMLElement {
     }
   }
 
-  /** Output tab: results from cells routed to global output only. */
-  private async renderGlobalOutput(sections: GlobalOutputSection[]) {
-    const host = this.notebookGlobalOutputHost;
-    if (!host) return;
-    const renderDisplay = this.renderNotebookDisplay;
-    const bridge = this.notebookBridgeRef;
-    // Notebook mode owns the output area; hide the whole-program output host.
-    this.programOutputHost?.classList.add('hidden');
-    host.innerHTML = '';
-    const globals = sections.filter((s) => !s.local && s.kind !== 'text');
-    if (globals.length === 0) {
-      host.innerHTML =
-        '<div class="text-xs italic text-slate-600">No global output. Cells set to local render under the cell — switch one to global to show its result here.</div>';
-      return;
-    }
-    for (const sec of globals) {
-      const section = document.createElement('div');
-      section.dataset.globalCellOutput = sec.cellId;
-      section.className = 'mb-3 rounded-lg border border-slate-800/80 bg-slate-900/40';
-
-      const head = document.createElement('button');
-      head.type = 'button';
-      head.className = 'flex w-full items-center gap-2 border-b border-slate-800/60 px-2.5 py-1.5 text-left';
-      head.title = 'Jump to this cell';
-      head.onclick = () => this.notebookApi?.focusCellById?.(sec.cellId);
-      const num = document.createElement('span');
-      num.className = 'shrink-0 text-[10px] font-bold uppercase tracking-wide text-slate-500';
-      num.textContent = `Cell ${sec.cellIndex + 1}`;
-      const prev = document.createElement('span');
-      prev.className = 'truncate font-mono text-[11px] text-slate-400';
-      prev.textContent = sec.preview ?? '';
-      head.appendChild(num);
-      head.appendChild(prev);
-      section.appendChild(head);
-
-      const content = document.createElement('div');
-      content.className = 'px-2.5 py-2';
-      section.appendChild(content);
-
-      if (!sec.outputs.length && !sec.error) {
-        const empty = document.createElement('div');
-        empty.className = 'text-[11px] italic text-slate-600';
-        empty.textContent = 'Not run yet.';
-        content.appendChild(empty);
-      }
-      for (const o of sec.outputs) {
-        const block = document.createElement('div');
-        block.className = 'mb-2';
-        content.appendChild(block);
-        if (!o.ok) {
-          block.innerHTML = `<div class="text-xs text-rose-400">${escapeHtml(o.error ?? 'Error')}</div>`;
-        } else if (renderDisplay && bridge) {
-          await renderDisplay(block, o.display ?? o.json, bridge);
-        } else {
-          block.innerHTML = `<pre class="whitespace-pre-wrap break-words text-xs text-slate-300">${escapeHtml(JSON.stringify(o.display ?? o.json, null, 2))}</pre>`;
-        }
-      }
-      if (sec.error) {
-        const err = document.createElement('div');
-        err.className = 'text-xs text-rose-400';
-        err.textContent = sec.error;
-        content.appendChild(err);
-      }
-      host.appendChild(section);
-    }
-  }
-
-  private setActiveSideTab(tab: 'output' | 'cells' | 'inputs') {
+  private setActiveSideTab(tab: 'cells' | 'inputs') {
     this.activeSideTab = tab;
-    const panels: Array<[HTMLDivElement | null, 'output' | 'cells' | 'inputs']> = [
-      [this.outputPanel, 'output'],
+    const panels: Array<[HTMLDivElement | null, 'cells' | 'inputs']> = [
       [this.cellsPanel, 'cells'],
       [this.inputsPanel, 'inputs'],
     ];
@@ -1523,24 +968,10 @@ class VerdictEditorElement extends HTMLElement {
     const tabButtons = this.mainContainer.querySelectorAll<HTMLButtonElement>('[data-tab-id]');
     tabButtons.forEach((btn) => {
       const selected = btn.dataset.tabId === tab;
-      const hidden = btn.dataset.tabId === 'output' && !this.showOutputTab;
-      btn.className =
-        (selected
-          ? 'rounded bg-indigo-600/30 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-indigo-200 ring-1 ring-inset ring-indigo-400/40'
-          : 'rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 hover:text-white') +
-        (hidden ? ' hidden' : '');
+      btn.className = selected
+        ? 'rounded bg-indigo-600/30 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-indigo-200 ring-1 ring-inset ring-indigo-400/40'
+        : 'rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 hover:text-white';
     });
-  }
-
-  /** Show/hide the whole-program Output tab (only relevant in source mode). */
-  private setOutputTabVisible(visible: boolean) {
-    this.showOutputTab = visible;
-    if (!visible && this.activeSideTab === 'output') {
-      this.setActiveSideTab('cells');
-    } else {
-      // Re-apply tab classes so the Output button's hidden state updates.
-      this.setActiveSideTab(this.activeSideTab);
-    }
   }
 
   private setActiveMainTab(tab: 'editor' | 'db' | 'debug' | 'visual') {
@@ -1565,7 +996,13 @@ class VerdictEditorElement extends HTMLElement {
       this.vizPanel.classList.toggle('hidden', tab !== 'visual');
     }
     if (tab === 'visual') {
+      // Opening the tab always re-renders, even if the source hasn't changed since.
+      this.vizDirty = true;
       void this.refreshVisualization();
+    }
+    if (tab === 'debug' && this.finvmState && Object.keys(this.finvmState).length > 0) {
+      // Show the current shared FinVM session (populated by notebook cell runs).
+      this.renderVmState(this.finvmState);
     }
     this.updateWorkspaceChrome();
     const tabButtons = this.mainContainer.querySelectorAll<HTMLButtonElement>('[data-main-tab-id]');
@@ -1596,49 +1033,186 @@ class VerdictEditorElement extends HTMLElement {
     }
   }
 
-  // Parse the current source via the compiler's `astJS` and render it as nested
-  // code blocks. Parse-only, so it shows structure even when later compile
-  // stages have errors.
+  // In notebook mode each code cell is visualized separately. DB and __INPUT_*
+  // substitution stay shared at the session level. Source mode = whole program.
   private async refreshVisualization() {
     if (!this.vizRoot || !this.vizDirty) return;
     try {
       if (!hyloLib) await loadHyloLib();
       if (!astLib) await loadAstLib();
-      if (!astLib || !hyloLib || !this.editor) return;
+      if (!astLib || !hyloLib) return;
       if (typeof astLib.astJS !== 'function') {
         this.vizRoot.innerHTML =
           '<div class="p-4 text-slate-500 italic">Code view unavailable: <code>/lib/verdict-ast.mjs</code> has no <code>astJS</code> export. See docs/visualization-tab-design.md.</div>';
         return;
       }
-      const source = this.materializeInputs(this.getVisualizationSource());
-      const res = astLib.astJS(source);
+
       this.vizCleanup?.();
       this.vizCleanup = null;
-      if (!res?.ok) {
-        this.vizRoot.innerHTML = `<div class="p-4 text-slate-500 italic">Can't show the code — ${escapeHtml(res?.error ?? 'parse error')}.</div>`;
+
+      const notebookCells = this.getNotebookCellsForViz();
+      if (notebookCells) {
+        await this.renderNotebookCellVisualizations(notebookCells);
+        this.vizDirty = false;
         return;
       }
-      const ast = JSON.parse(res.ast);
-      const docs = extractDocs(source);
-      if (this.vizMode === 'map') {
-        const gas = this.computeGasInfo(source);
-        this.vizCleanup = renderCallGraph(this.vizRoot, ast, gas, docs, (line) => this.jumpToSourceLine(line));
-      } else {
-        hyloLib.renderCode(`#${this.vizRoot.id}`, ast);
-        this.attachVizListeners();
-        // The renderer emits every card open; restore the user's collapsed ones,
-        // and surface each function's doc comment on hover.
-        this.vizRoot.querySelectorAll<HTMLDetailsElement>('details[data-def]').forEach((d) => {
-          if (d.dataset.def && this.collapsedDefs.has(d.dataset.def)) d.removeAttribute('open');
-          const doc = d.dataset.def ? docs.get(d.dataset.def) : undefined;
-          if (doc) d.title = doc;
-        });
-        const content = this.vizRoot.firstElementChild as HTMLElement | null;
-        if (content) this.vizCleanup = installArrowOverlay(content);
-      }
+
+      if (!this.editor) return;
+      const source = this.materializeInputs(this.getProgramSource());
+      const cleanups: Array<() => void> = [];
+      await this.renderSingleSourceVisualization(this.vizRoot, source, {
+        onJump: (line) => this.jumpToSourceLine(line),
+        collapseKey: (def) => def,
+        onCleanup: (fn) => cleanups.push(fn),
+      });
+      this.attachVizListeners();
+      this.vizCleanup = () => {
+        for (const fn of cleanups) fn();
+      };
       this.vizDirty = false;
     } catch (e) {
       this.vizRoot.innerHTML = `<div class="p-4 text-rose-400">Visualization error: ${escapeHtml(String(e))}</div>`;
+    }
+  }
+
+  private getNotebookCellsForViz(): VizNotebookCell[] | null {
+    if (this.notebookSourceMode || !this.notebookApi?.notebookCells) return null;
+    if (this.notebookApi.getViewMode?.() === 'source') return null;
+    return this.notebookApi.notebookCells().map((c, index) => ({
+      id: c.id,
+      kind: c.kind,
+      role: c.role,
+      path: c.path,
+      moduleName: c.moduleName,
+      source: c.source,
+      index,
+    }));
+  }
+
+  private async renderNotebookCellVisualizations(cells: VizNotebookCell[]) {
+    if (!this.vizRoot) return;
+    if (cells.length === 0) {
+      this.vizRoot.innerHTML =
+        '<div class="p-4 text-slate-500 italic">Add a module or runnable cell to see its structure here.</div>';
+      return;
+    }
+
+    const modules = notebookCellsToVizModules(cells);
+    const cleanups: Array<() => void> = [];
+    this.vizRoot.innerHTML = '';
+    this.vizRoot.className = 'min-h-full flex flex-col gap-4 p-3';
+
+    for (const moduleSection of modules) {
+      const section = document.createElement('details');
+      section.open = !this.collapsedVizModules.has(moduleSection.id);
+      section.dataset.vizModule = moduleSection.id;
+      section.dataset.vizCell = moduleSection.primaryCellId;
+      section.dataset.vizCellIds = moduleSection.cells.map((cell) => cell.id).join(' ');
+      section.className =
+        'notebook-viz-cell rounded-lg border border-slate-800 bg-slate-950/40 overflow-hidden';
+
+      const header = document.createElement('summary');
+      header.className =
+        'flex w-full cursor-pointer list-none items-center justify-between gap-2 border-b border-slate-800/80 bg-slate-900/60 px-3 py-2 text-left hover:bg-slate-900';
+      const kindLabel =
+        moduleSection.kind === 'text' ? 'Text' : moduleSection.kind === 'module' ? 'Module' : 'Runnable Module';
+      const cellCount = moduleSection.cells.length > 1 ? ` · ${moduleSection.cells.length} cells` : '';
+      header.innerHTML = `<span class="shrink-0 font-mono text-[12px] text-slate-500" data-viz-module-marker="${escapeHtml(moduleSection.id)}">${section.open ? '▾' : '▸'}</span><span class="text-[10px] font-bold uppercase tracking-wider text-indigo-300/90">${kindLabel}${cellCount}</span><span class="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-300">${escapeHtml(moduleSection.label)}</span><span class="hidden truncate text-[11px] text-slate-500 md:inline">${escapeHtml(moduleSection.preview)}</span>`;
+      section.appendChild(header);
+
+      const body = document.createElement('div');
+      body.dataset.vizCellBody = moduleSection.id;
+      body.className = 'min-h-[48px]';
+      section.appendChild(body);
+      this.vizRoot.appendChild(section);
+
+      if (moduleSection.kind === 'text') {
+        body.innerHTML =
+          '<div class="p-3 text-xs italic text-slate-500">Text cells are not compiled — visualization applies to code cells only.</div>';
+      } else {
+        const src = this.materializeInputs(moduleSection.source);
+        await this.renderSingleSourceVisualization(body, src, {
+          cellId: moduleSection.primaryCellId,
+          onJump: (line) => {
+            const mapped = mappedCellForLine(moduleSection, line);
+            this.jumpToSourceLine(mapped.line, mapped.cellId);
+          },
+          collapseKey: (def) => collapsedDefKey(moduleSection.id, def),
+          lineToCell: (line) => mappedCellForLine(moduleSection, line),
+          onCleanup: (fn) => cleanups.push(fn),
+        });
+      }
+    }
+
+    this.attachVizListeners();
+    this.vizCleanup = () => {
+      for (const fn of cleanups) fn();
+    };
+  }
+
+  private async renderSingleSourceVisualization(
+    host: HTMLElement,
+    source: string,
+    opts: {
+      cellId?: string;
+      lineOffset?: number;
+      onJump: (line: number) => void;
+      collapseKey: (defName: string) => string;
+      lineToCell?: (line: number) => { cellId: string; line: number };
+      onCleanup?: (fn: () => void) => void;
+    },
+  ) {
+    host.innerHTML = '';
+    const inner = document.createElement('div');
+    inner.className = 'notebook-viz-cell-inner p-2';
+    if (opts.cellId) inner.dataset.vizCell = opts.cellId;
+    host.appendChild(inner);
+
+    const trimmed = source.trim();
+    if (!trimmed || trimmed === 'module Main exposing ()') {
+      inner.innerHTML = '<div class="p-2 text-xs italic text-slate-500">Empty cell.</div>';
+      return;
+    }
+
+    const res = astLib!.astJS(source);
+    if (!res?.ok) {
+      inner.innerHTML = `<div class="p-2 text-xs text-slate-500 italic">Can't parse this cell — ${escapeHtml(res?.error ?? 'parse error')}.</div>`;
+      return;
+    }
+
+    const ast = JSON.parse(res.ast);
+    const docs = extractDocs(source);
+    const rootId = opts.cellId ? `viz-cell-${opts.cellId}` : this.vizRoot!.id;
+    inner.id = rootId;
+
+    if (this.vizMode === 'map') {
+      const gas = this.computeGasInfo(source);
+      const cleanup = renderCallGraph(inner, ast, gas, docs, opts.onJump);
+      opts.onCleanup?.(cleanup);
+      return;
+    }
+
+    hyloLib!.renderCode(`#${rootId}`, ast);
+    if (opts.lineToCell) {
+      inner.querySelectorAll<HTMLElement>('[data-src-line]').forEach((el) => {
+        const line = Number(el.dataset.srcLine ?? 0);
+        if (!Number.isFinite(line) || line <= 0) return;
+        const mapped = opts.lineToCell?.(line);
+        if (!mapped) return;
+        el.dataset.vizJumpCell = mapped.cellId;
+        el.dataset.vizJumpLine = String(mapped.line);
+      });
+    }
+    inner.querySelectorAll<HTMLDetailsElement>('details[data-def]').forEach((d) => {
+      const def = d.dataset.def;
+      if (def && this.collapsedDefs.has(opts.collapseKey(def))) d.removeAttribute('open');
+      const doc = def ? docs.get(def) : undefined;
+      if (doc) d.title = doc;
+    });
+    const content = inner.firstElementChild as HTMLElement | null;
+    if (content) {
+      const cleanup = installArrowOverlay(content);
+      opts.onCleanup?.(cleanup);
     }
   }
 
@@ -1674,6 +1248,20 @@ class VerdictEditorElement extends HTMLElement {
     });
   }
 
+  private revealVisualCell(cellId: string): boolean {
+    if (!this.vizRoot) return false;
+    const sections = [...this.vizRoot.querySelectorAll<HTMLDetailsElement>('[data-viz-module]')];
+    const target = sections.find((section) =>
+      (section.dataset.vizCellIds ?? '').split(' ').filter(Boolean).includes(cellId),
+    );
+    if (!target) return false;
+    target.open = true;
+    if (target.dataset.vizModule) this.collapsedVizModules.delete(target.dataset.vizModule);
+    target.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    this.notebookApi?.focusCellById?.(cellId);
+    return true;
+  }
+
   // One-time delegated listeners on the viz container: click-a-block→source, and
   // collapse-state tracking.
   private attachVizListeners() {
@@ -1683,29 +1271,47 @@ class VerdictEditorElement extends HTMLElement {
       const el = (e.target as HTMLElement).closest<HTMLElement>('[data-src-line]');
       if (!el) return;
       const line = Number(el.dataset.srcLine);
-      if (Number.isFinite(line)) this.jumpToSourceLine(line);
+      const section = el.closest<HTMLElement>('[data-viz-cell]');
+      const cellId = el.dataset.vizJumpCell || section?.dataset.vizCell;
+      const mappedLine = Number(el.dataset.vizJumpLine ?? line);
+      const offset = Number(section?.dataset.vizLineOffset ?? 0);
+      if (Number.isFinite(line)) this.jumpToSourceLine(Number.isFinite(mappedLine) ? mappedLine : line, cellId, offset);
     });
     // `toggle` doesn't bubble, so capture it on the way down.
     this.vizRoot.addEventListener(
       'toggle',
       (e) => {
         const d = e.target as HTMLDetailsElement;
-        if (!(d instanceof HTMLDetailsElement) || !d.dataset.def) return;
-        if (d.open) this.collapsedDefs.delete(d.dataset.def);
-        else this.collapsedDefs.add(d.dataset.def);
+        if (!(d instanceof HTMLDetailsElement)) return;
+        if (d.dataset.vizModule) {
+          if (d.open) this.collapsedVizModules.delete(d.dataset.vizModule);
+          else this.collapsedVizModules.add(d.dataset.vizModule);
+          const marker = d.querySelector<HTMLElement>('[data-viz-module-marker]');
+          if (marker) marker.textContent = d.open ? '▾' : '▸';
+          return;
+        }
+        if (!d.dataset.def) return;
+        const cellId = d.closest<HTMLElement>('[data-viz-cell]')?.dataset.vizCell;
+        const key = cellId ? collapsedDefKey(cellId, d.dataset.def) : d.dataset.def;
+        if (d.open) this.collapsedDefs.delete(key);
+        else this.collapsedDefs.add(key);
       },
       true,
     );
   }
 
-  // Reveal a source line in the editor (switching to the Editor tab, since the
-  // Monaco view is hidden while the Visual tab is open).
-  private jumpToSourceLine(line: number) {
-    if (!this.editor || !Number.isFinite(line)) return;
+  // Reveal a source line in the editor (notebook cell or whole-program source).
+  private jumpToSourceLine(line: number, cellId?: string, lineOffset = 0) {
+    if (!Number.isFinite(line)) return;
+    const cellLine = Math.max(1, line - lineOffset);
+    if (cellId && this.notebookApi?.focusCellById && !this.notebookSourceMode) {
+      this.setActiveMainTab('editor');
+      this.notebookApi.focusCellById(cellId);
+      return;
+    }
+    if (!this.editor) return;
     this.setActiveMainTab('editor');
-    this.editor.revealLineInCenter(line);
-    this.editor.setSelection(new monaco.Range(line, 1, line, Number.MAX_SAFE_INTEGER));
-    this.editor.focus();
+    this.editor.revealLine(cellLine);
   }
 
   private beginBusy(message: string) {
@@ -1725,6 +1331,58 @@ class VerdictEditorElement extends HTMLElement {
     }
   }
 
+  private programLanguageService() {
+    const self = this;
+    return {
+      getProgramDiagnostics: () => self.languageAnalysis.diagnostics,
+      getSignatures: () => self.languageAnalysis.signatures,
+      getEvalBindings: () => self.languageAnalysis.evalBindings,
+      getDocs: () => self.languageAnalysis.docs,
+      getCellSource: () => self.getProgramSource(),
+      getBindingNames: () => null as null,
+    };
+  }
+
+  private refreshLanguageAnalysis() {
+    if (!this.editor || !vlib) return;
+    const src = this.materializeInputs(this.getProgramSource());
+    let h = 5381;
+    for (let i = 0; i < src.length; i++) h = ((h << 5) + h + src.charCodeAt(i)) | 0;
+    const sig = `${src.length}:${h >>> 0}`;
+    if (this.languageAnalysisSig === sig) return;
+    this.languageAnalysisSig = sig;
+
+    try {
+      this.languageAnalysis.diagnostics = vlib.diagnosticsJS(src);
+    } catch {
+      return;
+    }
+
+    const errors = this.languageAnalysis.diagnostics.filter(
+      (d: VerdictDiagnostic) => d.severity !== 'warning',
+    );
+    this.setStatus(errors.length);
+
+    try {
+      this.languageAnalysis.signatures = vlib.signaturesJS(src);
+    } catch {
+      this.languageAnalysis.signatures = [];
+    }
+    this.languageAnalysis.docs = extractVerdictDocs(src);
+
+    if (errors.length > 0) {
+      this.languageAnalysis.evalBindings = [];
+    } else {
+      try {
+        this.languageAnalysis.evalBindings = vlib.evalBindingsJS(src);
+      } catch {
+        this.languageAnalysis.evalBindings = [];
+      }
+    }
+
+    this.editor.refreshLanguageService();
+  }
+
   // Debounce edits into a single background pass ~250ms after typing stops.
   private scheduleUpdate() {
     if (this.diagnosticsTimer !== null) {
@@ -1738,45 +1396,9 @@ class VerdictEditorElement extends HTMLElement {
     }, 250);
   }
 
-  // Parse + typecheck the current source and paint Monaco markers. No bytecode
-  // is generated and nothing runs — this is the always-on "is my code valid?"
-  // feedback loop, independent of the Run button.
+  // Parse + typecheck the current source and paint error squiggles + inline results.
   private runDiagnostics() {
-    if (!this.editor) return;
-    const model = this.editor.getModel();
-    if (!model) return;
-
-    if (!vlib) return;
-    let diagnostics: VerdictDiagnostic[];
-    try {
-      diagnostics = vlib.diagnosticsJS(this.materializeInputs(this.getProgramSource()));
-    } catch {
-      // A compiler crash shouldn't wipe the editor; just skip this pass.
-      return;
-    }
-
-    const markers: monaco.editor.IMarkerData[] = diagnostics.map((d) => {
-      // The compiler gives a point; widen the squiggle to the word under it so
-      // the marker is grabbable, falling back to a single char at line end.
-      const word = model.getWordAtPosition({ lineNumber: d.line, column: d.column });
-      const startColumn = word ? word.startColumn : d.column;
-      const endColumn = word
-        ? word.endColumn
-        : Math.max(d.column + 1, model.getLineMaxColumn(Math.min(d.line, model.getLineCount())));
-      return {
-        startLineNumber: d.line,
-        startColumn,
-        endLineNumber: d.line,
-        endColumn,
-        message: d.message,
-        severity: d.severity === 'warning'
-          ? monaco.MarkerSeverity.Warning
-          : monaco.MarkerSeverity.Error,
-      };
-    });
-
-    monaco.editor.setModelMarkers(model, 'verdict', markers);
-    this.setStatus(markers.length);
+    this.refreshLanguageAnalysis();
   }
 
   private setStatus(errorCount: number) {
@@ -1789,60 +1411,80 @@ class VerdictEditorElement extends HTMLElement {
     }
   }
 
-  // Notebook seed: evaluate every nullary top-level binding and show its value
-  // as ghost text at the end of that binding's definition line. Returns [] (and
-  // so clears all results) whenever the program doesn't parse or typecheck.
+  // Inline binding results are rendered by the CM6 language service.
   private runInlineResults() {
-    if (!this.editor || !this.resultDecorations) return;
-    const model = this.editor.getModel();
-    if (!model) return;
-
-    if (!vlib) return;
-    let results: VerdictBindingResult[];
-    try {
-      results = vlib.evalBindingsJS(this.materializeInputs(this.getProgramSource()));
-    } catch {
-      this.resultDecorations.clear();
-      return;
-    }
-
-    const decorations: monaco.editor.IModelDeltaDecoration[] = [];
-    for (const r of results) {
-      const line = this.findDefinitionLine(model, r.name);
-      if (line === null) continue;
-      const endColumn = model.getLineMaxColumn(line);
-      const text = r.ok ? `⟹ ${r.value}` : `⚠ ${r.error}`;
-      decorations.push({
-        range: new monaco.Range(line, endColumn, line, endColumn),
-        options: {
-          after: {
-            content: '   ' + text,
-            inlineClassName: r.ok ? 'verdict-result' : 'verdict-result-error',
-          },
-          showIfCollapsed: true,
-        },
-      });
-    }
-    this.resultDecorations.set(decorations);
-  }
-
-  // Find the line where a top-level binding is *defined* (`name = ...` or
-  // `name ... =`), as opposed to its signature line (`name : ...`). Top-level
-  // declarations start at column 1, so we anchor the name there.
-  private findDefinitionLine(model: monaco.editor.ITextModel, name: string): number | null {
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // name at column 1, not immediately followed by `:` (that's the signature).
-    const re = new RegExp('^' + escaped + '\\b(?!\\s*:)');
-    const total = model.getLineCount();
-    for (let line = 1; line <= total; line++) {
-      if (re.test(model.getLineContent(line))) return line;
-    }
-    return null;
+    /* Inline results are updated by refreshLanguageAnalysis (CM6 widgets). */
   }
 
   run() {
     if (!this.editor) return;
     void this.runProgram();
+  }
+
+  private onLiveIntervalChanged() {
+    const secs = Number(this.liveIntervalInput?.value);
+    if (Number.isFinite(secs) && secs >= 1) {
+      this.liveIntervalMs = Math.round(secs * 1000);
+    }
+  }
+
+  // Start/Stop the live loop. While active, every cell re-runs every
+  // `liveIntervalMs` against the shared FinVM session: the strategy cell keeps
+  // fetching + writing shared state, downstream cells re-read it and re-render
+  // their charts, all without user interaction.
+  private toggleLiveLoop() {
+    if (this.liveActive) this.stopLiveLoop();
+    else void this.startLiveLoop();
+  }
+
+  private async startLiveLoop() {
+    if (this.liveActive) return;
+    this.liveActive = true;
+    this.updateRunToggleUi();
+    // Run an immediate first tick, then schedule subsequent ones.
+    await this.liveTick();
+  }
+
+  private stopLiveLoop() {
+    this.liveActive = false;
+    if (this.liveTimer !== null) {
+      window.clearTimeout(this.liveTimer);
+      this.liveTimer = null;
+    }
+    this.notebookApi?.stopAll?.();
+    this.updateRunToggleUi();
+  }
+
+  private async liveTick() {
+    if (!this.liveActive) return;
+    if (!this.liveBusy) {
+      this.liveBusy = true;
+      try {
+        await this.runProgram();
+      } catch {
+        /* keep the loop alive across transient run errors */
+      } finally {
+        this.liveBusy = false;
+      }
+    }
+    if (!this.liveActive) return;
+    this.liveTimer = window.setTimeout(() => {
+      this.liveTimer = null;
+      void this.liveTick();
+    }, this.liveIntervalMs);
+  }
+
+  private updateRunToggleUi() {
+    if (!this.runToggleBtn) return;
+    if (this.liveActive) {
+      this.runToggleBtn.textContent = 'Stop';
+      this.runToggleBtn.className =
+        'inline-flex items-center rounded-md border border-rose-500/40 bg-rose-500/15 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-rose-200 transition-colors hover:bg-rose-500/25';
+    } else {
+      this.runToggleBtn.textContent = 'Run';
+      this.runToggleBtn.className =
+        'inline-flex items-center rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-emerald-200 transition-colors hover:bg-emerald-500/25';
+    }
   }
 
   private async runProgram() {
@@ -1911,13 +1553,11 @@ class VerdictEditorElement extends HTMLElement {
   }
 
   private renderOutput(text: string, tone: 'ok' | 'error' | 'info') {
+    if (!this.notebookSourceMode) return;
     const color =
       tone === 'ok' ? 'text-emerald-300' : tone === 'error' ? 'text-rose-200' : 'text-indigo-300';
     this.programOutputHost.classList.remove('hidden');
     this.programOutputHost.innerHTML = `<div class="${color} font-mono text-sm whitespace-pre-wrap break-words">${escapeHtml(text)}</div>`;
-    // Whole-program output exists — make sure the Output tab is reachable.
-    this.setOutputTabVisible(true);
-    this.setActiveSideTab('output');
   }
 
   private installResizeHandle(handle: HTMLDivElement) {
@@ -2610,6 +2250,13 @@ class VerdictEditorElement extends HTMLElement {
     }
   }
 
+  private onRuntimeInputsChanged() {
+    this.refreshInputsPreview();
+    this.runDiagnostics();
+    this.runInlineResults();
+    this.markVizDirty();
+  }
+
   private materializeInputs(code: string): string {
     const runtimeInputs = this.readRuntimeInputs();
     let materialized = code;
@@ -2669,16 +2316,10 @@ class VerdictEditorElement extends HTMLElement {
     removeBtn.textContent = 'x';
     removeBtn.onclick = () => {
       row.remove();
-      this.refreshInputsPreview();
-      this.runDiagnostics();
-      this.runInlineResults();
+      this.onRuntimeInputsChanged();
     };
-    keyInput.oninput = () => {
-      this.refreshInputsPreview();
-      this.runDiagnostics();
-      this.runInlineResults();
-    };
-    valueInput.oninput = keyInput.oninput;
+    keyInput.oninput = () => this.onRuntimeInputsChanged();
+    valueInput.oninput = () => this.onRuntimeInputsChanged();
     row.appendChild(keyInput);
     row.appendChild(valueInput);
     row.appendChild(removeBtn);
@@ -2692,7 +2333,7 @@ class VerdictEditorElement extends HTMLElement {
       mode: this.notebookApi?.getViewMode?.() === 'notebook' ? 'notebook' : 'program',
       userInputs,
       placeholders: Object.keys(userInputs).map((k) => `__INPUT_${k}__`),
-      note: 'Market data is fetched inside your Verdict code (httpGet). The editor only substitutes __INPUT_* values and runs the VM.',
+      note: 'Shared across all cells. __INPUT_* placeholders are substituted before compile/eval. Market data is fetched in Verdict (httpGet).',
     };
     const json = JSON.stringify(preview, null, 2);
     this.inputsPreview.innerHTML = `<pre class="whitespace-pre-wrap break-words">${escapeHtml(json)}</pre>`;
@@ -2712,20 +2353,20 @@ class VerdictEditorElement extends HTMLElement {
   }
 
   disconnectedCallback() {
+    this.stopLiveLoop();
     if (this.diagnosticsTimer !== null) {
       window.clearTimeout(this.diagnosticsTimer);
       this.diagnosticsTimer = null;
     }
     this.resizeCleanup?.();
     this.resizeCleanup = null;
-    this.editor?.dispose();
-    this.bytecodeEditor?.dispose();
+    this.editor?.destroy();
+    this.bytecodeEditor?.destroy();
     this.editor = null;
     this.bytecodeEditor = null;
     this.vmStatePanel = null;
     this.vmObserverPanel = null;
     this.vmDbPanel = null;
-    this.resultDecorations = null;
     // Reset so a reconnect (e.g. SPA route re-entry) rebuilds from scratch
     // rather than leaving disposed editors behind.
     this.innerHTML = '';

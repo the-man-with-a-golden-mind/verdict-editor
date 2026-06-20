@@ -40,6 +40,43 @@ function makeCtx(vlib, finvm, createEffectStorage) {
   };
 }
 
+test("FinVM: loopEvery sleeps via real time.sleep effect and returns step result", async () => {
+  const { evalNotebookCells, createEffectStorage, vlib, finvm } = await loadLibs();
+  const { ctx } = makeCtx(vlib, finvm, createEffectStorage);
+  const src = `module Main exposing (main)
+
+main : Int
+main = loopEvery(20, step)
+
+step : Unit -> Int
+step _ = 7
+`;
+  const t0 = Date.now();
+  const out = await evalNotebookCells(ctx, src, ["main"]);
+  assert.equal(out[0]?.ok, true, out[0]?.error);
+  assert.match(String(out[0]?.display?.text), /7/);
+  assert.ok(Date.now() - t0 >= 15, "the real time.sleep effect should delay the run");
+});
+
+test("FinVM: aborting a sleeping cell rejects the pending sleep promptly", async () => {
+  const { evalNotebookCells, createEffectStorage, vlib, finvm } = await loadLibs();
+  const { ctx } = makeCtx(vlib, finvm, createEffectStorage);
+  const src = `module Main exposing (main)
+
+main : Int
+main = loopEvery(5000, step)
+
+step : Unit -> Int
+step _ = 7
+`;
+  const ac = new AbortController();
+  const t0 = Date.now();
+  setTimeout(() => ac.abort(), 10);
+  const out = await evalNotebookCells(ctx, src, ["main"], { signal: ac.signal });
+  assert.equal(out[0]?.ok, false);
+  assert.ok(Date.now() - t0 < 4000, "abort must not wait out the full 5s sleep");
+});
+
 test("FinVM: scalar binding renders text display", async () => {
   const { evalNotebookCells, createEffectStorage, vlib, finvm } = await loadLibs();
   const { ctx } = makeCtx(vlib, finvm, createEffectStorage);
@@ -135,7 +172,7 @@ y = 2
   assert.match(String(out[1]?.display?.text ?? out[1]?.json), /2/);
 });
 
-test("FinVM: prefix eval re-runs prior binding before later cell", async () => {
+test("FinVM: sequential cell runs share db state without prefix re-eval", async () => {
   const { evalNotebookCells, createEffectStorage, vlib, finvm } = await loadLibs();
   const { ctx, getStorage } = makeCtx(vlib, finvm, createEffectStorage);
   const cell1 = `module Main exposing (seed)
@@ -145,11 +182,9 @@ seed = dbInsert("items", { val = "hello" })
 `;
   await evalNotebookCells(ctx, cell1, ["seed"]);
   const full = cell1 + `\n\ncount : Int\ncount = 1\n`;
-  const out = await evalNotebookCells(ctx, full, ["seed", "count"]);
-  assert.equal(out.length, 2);
-  assert.equal(out[0]?.name, "seed");
+  const out = await evalNotebookCells(ctx, full, ["count"]);
+  assert.equal(out.length, 1);
+  assert.equal(out[0]?.name, "count");
   assert.equal(out[0]?.ok, true);
-  assert.ok(getStorage().listDbTables().items.length >= 2);
-  assert.equal(out[1]?.name, "count");
-  assert.equal(out[1]?.ok, true);
+  assert.ok(getStorage().listDbTables().items.length >= 1);
 });

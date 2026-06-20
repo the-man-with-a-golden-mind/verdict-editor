@@ -1,0 +1,227 @@
+module Market exposing (binanceSymbol, binancePriceUrl, binanceKlinesUrl, dollarsToCents, jsonStringField, priceCentsFromBody, fetchPriceCents, fetchHistPricesCents, histKey, histCsvOrEmpty, appendHistCsv, saveHistCsv, pushParsed, parseCsvInts, lastN, lastInt, listMin, listMax, isqrt, statsOf, meanOf, varianceOf, stddevOf, zScoreOf, emaOf, slopeOf, rangePosOf, momentumOf, appendStr, joinStr, centsToUsd, signedCentis, scoreOf, decisionFromScore, klineCloseCents, parseKlinesBody, indicesOf)
+
+-- Market: shared market-data + indicator + scoring helpers for notebook cells.
+-- Cells `import Market exposing (..)` instead of redefining these, so cell 1 and
+-- cell 2 share one set of helpers (no cross-cell namespace drift). The FinVM
+-- runtime ships str/logic/bigint builtins and effectful builtins (httpGet,
+-- cacheGet/Set, dbInsert); everything statistical here is derived from foldl +
+-- integer math from first principles.
+
+-- ── Binance endpoints ───────────────────────────────────────────────────────
+binanceSymbol : String -> String
+binanceSymbol sym =
+  if sym == "BTCUSD" then "BTCUSDT"
+  else if sym == "ETHUSD" then "ETHUSDT"
+  else if sym == "ADAUSD" then "ADAUSDT"
+  else sym
+
+binancePriceUrl : String -> String
+binancePriceUrl sym =
+  strConcat("https://api.binance.com/api/v3/ticker/price?symbol=", binanceSymbol(sym))
+
+binanceKlinesUrl : String -> String
+binanceKlinesUrl sym =
+  strConcat(strConcat("https://api.binance.com/api/v3/klines?symbol=", binanceSymbol(sym)), "&interval=1h&limit=200")
+
+-- ── Parsing prices out of JSON bodies (str.* only; no json.* builtins) ───────
+dollarsToCents : String -> Int
+dollarsToCents px =
+  let parts = split(px, ".") in
+  let whole = withDefault(0, parseInt(withDefault("0", head(parts)))) in
+  let fracRaw = withDefault("0", head(drop(1, parts))) in
+  let frac = strSlice(fracRaw, 0, 2) in
+  let fracPad = if strLength(frac) < 2 then strConcat(frac, "0") else frac in
+  whole * 100 + withDefault(0, parseInt(fracPad))
+
+jsonStringField : String -> String -> String
+jsonStringField key body =
+  let marker = strConcat("\"", strConcat(key, "\":\"")) in
+  let afterKey = split(body, marker) in
+  if length(afterKey) < 2 then ""
+  else
+    let rest = withDefault("", head(drop(1, afterKey))) in
+    withDefault("", head(split(rest, "\"")))
+
+priceCentsFromBody : String -> Int
+priceCentsFromBody body = dollarsToCents(jsonStringField("price", body))
+
+fetchPriceCents : String -> Int
+fetchPriceCents sym =
+  let res = httpGet(binancePriceUrl(sym)) in
+  if res.ok then priceCentsFromBody(res.body) else 0
+
+-- Binance klines: parse close prices from the JSON array without json.* builtins.
+klineCloseCents : String -> Int
+klineCloseCents chunk =
+  dollarsToCents(withDefault("0", head(drop(3, split(chunk, "\",\"")))))
+
+parseKlinesBody : String -> List Int
+parseKlinesBody body = foldl(pushKlineChunk, [], split(body, "],["))
+
+pushKlineChunk : List Int -> String -> List Int
+pushKlineChunk acc chunk =
+  if strLength(chunk) == 0 then acc else append(acc, klineCloseCents(chunk))
+
+fetchHistPricesCents : String -> List Int
+fetchHistPricesCents sym =
+  let res = httpGet(binanceKlinesUrl(sym)) in
+  if res.ok then parseKlinesBody(res.body) else []
+
+-- ── Cache-backed price history (CSV string in the shared cache) ─────────────
+histKey : String -> String
+histKey sym = strConcat("hist:", sym)
+
+histCsvOrEmpty : String -> String
+histCsvOrEmpty sym =
+  let raw = cacheGet("market", histKey(sym)) in
+  if raw == unit then "" else raw
+
+appendHistCsv : String -> Int -> String
+appendHistCsv csv px =
+  if strLength(csv) == 0 then fromInt(px)
+  else strConcat(csv, strConcat(",", fromInt(px)))
+
+saveHistCsv : String -> String -> Bool
+saveHistCsv sym csv = cacheSet("market", histKey(sym), csv)
+
+-- ── Series parsing & windowing ──────────────────────────────────────────────
+pushParsed : List Int -> String -> List Int
+pushParsed acc s = append(acc, withDefault(0, parseInt(trim(s))))
+
+parseCsvInts : String -> List Int
+parseCsvInts csv = foldl(pushParsed, [], split(csv, ","))
+
+lastN : Int -> List Int -> List Int
+lastN n xs =
+  let len = length(xs) in
+  let dropN = if len > n then len - n else 0 in
+  drop(dropN, xs)
+
+lastInt : List Int -> Int
+lastInt xs = withDefault(0, last(xs))
+
+listMin : List Int -> Int
+listMin xs = foldl(min, withDefault(0, head(xs)), xs)
+
+listMax : List Int -> Int
+listMax xs = foldl(max, withDefault(0, head(xs)), xs)
+
+-- 0,1,2,... index list, one per sample (for chart x axes).
+indicesOf : List Int -> List Int
+indicesOf xs = (foldl(idxAcc, { i = 0, out = [] }, xs)).out
+
+idxAcc : { i : Int, out : List Int } -> Int -> { i : Int, out : List Int }
+idxAcc a _ = { i = a.i + 1, out = append(a.out, a.i) }
+
+-- ── Integer square root (Newton's method, pure Verdict) ─────────────────────
+isqrtGo : Int -> Int -> Int
+isqrtGo n x =
+  let y = (x + n / x) / 2 in
+  if y < x then isqrtGo(n, y) else x
+
+isqrt : Int -> Int
+isqrt n =
+  if n < 2 then (if n < 0 then 0 else n)
+  else isqrtGo(n, n / 2)
+
+-- ── Mean / variance / standard deviation (single-pass accumulator) ──────────
+accStat : { n : Int, s : Int, ss : Int } -> Int -> { n : Int, s : Int, ss : Int }
+accStat a x = { n = a.n + 1, s = a.s + x, ss = a.ss + x * x }
+
+statsOf : List Int -> { n : Int, s : Int, ss : Int }
+statsOf xs = foldl(accStat, { n = 0, s = 0, ss = 0 }, xs)
+
+meanOf : List Int -> Int
+meanOf xs =
+  let st = statsOf(xs) in
+  if st.n == 0 then 0 else st.s / st.n
+
+varianceOf : List Int -> Int
+varianceOf xs =
+  let st = statsOf(xs) in
+  if st.n == 0 then 0
+  else
+    let m = st.s / st.n in
+    let v = st.ss / st.n - m * m in
+    if v < 0 then 0 else v
+
+stddevOf : List Int -> Int
+stddevOf xs = isqrt(varianceOf(xs))
+
+zScoreOf : List Int -> Int
+zScoreOf xs =
+  let sd = stddevOf(xs) in
+  if sd == 0 then 0
+  else (lastInt(xs) - meanOf(xs)) * 100 / sd
+
+-- ── Exponential moving average (alpha = 2 / (period + 1)) ───────────────────
+emaAcc : { p : Int, e : Int, seen : Int } -> Int -> { p : Int, e : Int, seen : Int }
+emaAcc a x =
+  if a.seen == 0 then { p = a.p, e = x, seen = 1 }
+  else { p = a.p, e = (x * 2 + a.e * (a.p - 1)) / (a.p + 1), seen = a.seen + 1 }
+
+emaOf : Int -> List Int -> Int
+emaOf period xs =
+  let r = foldl(emaAcc, { p = period, e = 0, seen = 0 }, xs) in
+  r.e
+
+-- ── Linear-regression slope over the window (least squares, cents/step) ─────
+regAcc : { i : Int, sx : Int, sy : Int, sxy : Int, sxx : Int } -> Int -> { i : Int, sx : Int, sy : Int, sxy : Int, sxx : Int }
+regAcc a y =
+  { i = a.i + 1, sx = a.sx + a.i, sy = a.sy + y, sxy = a.sxy + a.i * y, sxx = a.sxx + a.i * a.i }
+
+slopeOf : List Int -> Int
+slopeOf xs =
+  let n = length(xs) in
+  if n < 2 then 0
+  else
+    let r = foldl(regAcc, { i = 0, sx = 0, sy = 0, sxy = 0, sxx = 0 }, xs) in
+    let denom = n * r.sxx - r.sx * r.sx in
+    if denom == 0 then 0 else (n * r.sxy - r.sx * r.sy) / denom
+
+rangePosOf : List Int -> Int
+rangePosOf xs =
+  let lo = listMin(xs) in
+  let hi = listMax(xs) in
+  if hi == lo then 50 else (lastInt(xs) - lo) * 100 / (hi - lo)
+
+momentumOf : List Int -> Int
+momentumOf xs =
+  let n = length(xs) in
+  if n < 2 then 0 else lastInt(xs) - xs[n - 2]
+
+-- ── Reporting helpers (str.* only; no json.*) ───────────────────────────────
+appendStr : String -> String -> String
+appendStr acc s = strConcat(acc, s)
+
+joinStr : List String -> String
+joinStr parts = foldl(appendStr, "", parts)
+
+centsToUsd : Int -> String
+centsToUsd c =
+  let whole = c / 100 in
+  let frac = c - whole * 100 in
+  let fracStr = if frac < 10 then strConcat("0", fromInt(frac)) else fromInt(frac) in
+  strConcat(fromInt(whole), strConcat(".", fracStr))
+
+signedCentis : Int -> String
+signedCentis c =
+  if c < 0 then strConcat("-", centsToUsd(0 - c)) else centsToUsd(c)
+
+-- ── Signal scoring: blends trend, mean-reversion and momentum ───────────────
+scoreOf : Int -> Int -> Int -> Int -> Int -> Int -> Int
+scoreOf z emaFast emaSlow slope mom bias =
+  let cross = emaFast - emaSlow in
+  let trend = if cross > 0 then 2 else if cross < 0 then (0 - 2) else 0 in
+  let slopeSig = if slope > 0 then 1 else if slope < 0 then (0 - 1) else 0 in
+  let revert = if z < (0 - 150) then 2 else if z > 150 then (0 - 2) else 0 in
+  let accel = if mom > 0 then 1 else if mom < 0 then (0 - 1) else 0 in
+  trend + slopeSig + revert + accel + bias
+
+decisionFromScore : Int -> Int -> String
+decisionFromScore s threshold =
+  if s > threshold then "BUY"
+  else if s == threshold then "BUY"
+  else if s < (0 - threshold) then "SELL"
+  else if s == (0 - threshold) then "SELL"
+  else "HOLD"

@@ -1,0 +1,30 @@
+module CellBus exposing (busPost, busRead, busQueue, busPending, busTakeFirst)
+
+-- Simple cross-cell messaging via the shared notebook DB (same FinVM session).
+-- Each cell run is independent; data persists in DB tables until you delete it.
+
+-- Append a record to a table (channel name = table name). Returns the row id.
+busPost : String -> Json -> String
+busPost table message = dbInsert(table, message)
+
+-- Read one row by id (use the id returned from an earlier cell's busPost/busQueue).
+busRead : String -> String -> Json
+busRead table rowId = dbGet(table, rowId)
+
+-- Queue: append to queue/{channel}. Multiple cells can enqueue; others drain.
+busQueue : String -> Json -> String
+busQueue channel message =
+  dbInsert(queueTable(channel), { body = message })
+
+queueTable : String -> String
+queueTable channel = strConcat("queue/", channel)
+
+-- All pending messages on a channel (insertion order).
+busPending : String -> List Json
+busPending channel = dbQuery(queueTable(channel), {})
+
+-- First queued message body, or unit when empty.
+busTakeFirst : String -> Json
+busTakeFirst channel =
+  let rows = busPending(channel) in
+  if length(rows) == 0 then unit else get(rows, 0).body

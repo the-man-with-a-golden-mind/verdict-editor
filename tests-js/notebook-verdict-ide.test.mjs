@@ -32,11 +32,12 @@ async function loadLibs() {
 function makeCtx(vlib, finvm, createEffectStorage) {
   let storage = createEffectStorage();
   let state = {};
+  const getState = () => state;
   return {
     ctx: {
       vlib,
       finvm,
-      getFinvmState: () => state,
+      getFinvmState: getState,
       setFinvmState: (s) => {
         state = s;
       },
@@ -46,7 +47,7 @@ function makeCtx(vlib, finvm, createEffectStorage) {
       },
       materialize: materializeIde,
     },
-    getState: () => state,
+    getState,
     getStorage: () => storage,
   };
 }
@@ -118,6 +119,30 @@ step2 = 1
 
   const snap2 = getState()[FINVM_SNAPSHOT_KEY];
   assert.ok(countLiveProcesses(snap2) >= 1, "background IDE actor remains after cell 2");
+});
+
+test("VerdictIDE: per-cell run does not re-execute earlier cells (shared cache)", async () => {
+  const { evalNotebookCells, createEffectStorage, vlib, finvm } = await loadLibs();
+  const { ctx, getStorage } = makeCtx(vlib, finvm, createEffectStorage);
+
+  const src = `module Main exposing (seed, readSeed)
+
+seed : Unit
+seed = let _ = idePut("session", "n", { v = 99 }) in unit
+
+readSeed : Int
+readSeed =
+  let row = ideGet("session", "n") in
+  row.v
+`;
+
+  const out1 = await evalNotebookCells(ctx, src, ["seed"], { cell: { id: "c-seed", index: 0 } });
+  assert.equal(out1[0]?.ok, true, out1[0]?.error);
+
+  const out2 = await evalNotebookCells(ctx, src, ["readSeed"], { cell: { id: "c-read", index: 1 } });
+  assert.equal(out2[0]?.ok, true, out2[0]?.error);
+  assert.match(displayText(out2[0]), /99/);
+  assert.equal(getStorage().cacheGet("ide", "session/n")?.v, 99);
 });
 
 test("VerdictIDE: registerWorker and ask in one cell", async () => {

@@ -1,29 +1,58 @@
 module Main
   ( mountNotebook
   , concatenateCodeExport
+  , concatenateDocumentExport
   , bindingNamesExport
+  , bindingNamesFromSourceExport
+  , cellPreviewLineExport
+  , seedSignatureExport
+  , extractVerdictDocsExport
+  , defaultCellUiExport
+  , updateModelExport
   , escapeFieldExport
   , rowsToCsvExport
   , decodeDisplayKindExport
   , spreadsheetCsvExport
   , renderDisplayIntoExport
   , mountSpreadsheetViewExport
+  , mountToolbarExport
+  , mountGutterExport
+  , mountCellHeadExport
+  , mountDiagnosticsExport
+  , mountCodeFoldedBarExport
+  , mountFoldedPreviewExport
+  , routeEvalResultsExport
+  , main
   ) where
 
 import Prelude
 
-import Cell (Cell, CellKind(..))
+import Cell (Cell, CellKind(..), CellUi, defaultCellUi)
 import Csv (escapeField, rowsToCsv)
 import Display as D
-import Notebook (concatenateCode, bindingNamesInCell)
+import Notebook
+  ( concatenateCode
+  , concatenateDocument
+  , bindingNamesInCell
+  , bindingNamesFromSource
+  , cellPreviewLine
+  )
+import Notebook.CellChrome as CC
+import Notebook.Gutter as GT
+import Notebook.Model as NM
+import Notebook.Run as RN
+import Notebook.Toolbar as TB
+import Seed (seedSignature)
 import Spreadsheet as SS
+import VerdictDocs (DocEntry, extractVerdictDocs)
 import Data.Maybe (Maybe(..))
 import Effect (Effect)
-import Effect.Uncurried (EffectFn1, EffectFn2, EffectFn3, mkEffectFn1, mkEffectFn3)
+import Effect.Uncurried (EffectFn1, EffectFn2, EffectFn3, EffectFn4, mkEffectFn1, mkEffectFn2, mkEffectFn3)
 import Foreign (Foreign)
 
 foreign import mountNotebookImpl :: String -> Foreign -> String -> Effect Foreign
 foreign import unsafeReadString :: Foreign -> String -> String
+foreign import unsafeReadCellUi :: Foreign -> CellUi
 foreign import unsafeToRows :: Foreign -> Array (Array String)
 
 mountNotebook :: EffectFn3 String Foreign String Foreign
@@ -33,15 +62,42 @@ concatenateCodeExport :: EffectFn1 (Array Foreign) String
 concatenateCodeExport = mkEffectFn1 \rows ->
   pure (concatenateCode (map foreignToCell rows))
 
+concatenateDocumentExport :: EffectFn1 (Array Foreign) String
+concatenateDocumentExport = mkEffectFn1 \rows ->
+  pure (concatenateDocument (map foreignToCell rows))
+
 bindingNamesExport :: EffectFn1 Foreign (Array String)
 bindingNamesExport = mkEffectFn1 \row ->
   pure (bindingNamesInCell (foreignToCell row))
+
+bindingNamesFromSourceExport :: EffectFn1 String (Array String)
+bindingNamesFromSourceExport = mkEffectFn1 \src -> pure (bindingNamesFromSource src)
+
+cellPreviewLineExport :: EffectFn1 Foreign String
+cellPreviewLineExport = mkEffectFn1 \row -> pure (cellPreviewLine (foreignToCell row))
+
+seedSignatureExport :: EffectFn1 String String
+seedSignatureExport = mkEffectFn1 \src -> pure (seedSignature src)
+
+extractVerdictDocsExport :: EffectFn1 String (Array DocEntry)
+extractVerdictDocsExport = mkEffectFn1 \src -> pure (extractVerdictDocs src)
+
+defaultCellUiExport :: EffectFn1 Unit CellUi
+defaultCellUiExport = mkEffectFn1 \_ -> pure defaultCellUi
+
+updateModelExport :: EffectFn2 NM.JsModel NM.JsMsg NM.JsModel
+updateModelExport = mkEffectFn2 \model msg -> pure (NM.updateJsModel msg model)
 
 foreignToCell :: Foreign -> Cell
 foreignToCell f =
   { id: unsafeReadString f "id"
   , kind: if unsafeReadString f "kind" == "wysiwyg" then Wysiwyg else Code
+  , role: unsafeReadString f "role"
+  , path: unsafeReadString f "path"
+  , moduleName: unsafeReadString f "moduleName"
+  , name: unsafeReadString f "name"
   , source: unsafeReadString f "source"
+  , ui: unsafeReadCellUi f
   }
 
 escapeFieldExport :: EffectFn1 String String
@@ -68,6 +124,28 @@ spreadsheetCsvExport = mkEffectFn1 \raw ->
 
 mountSpreadsheetViewExport :: EffectFn2 Foreign Foreign Unit
 mountSpreadsheetViewExport = SS.mountSpreadsheetViewExport
+
+mountToolbarExport :: EffectFn2 Foreign TB.ToolbarProps Unit
+mountToolbarExport = TB.mountToolbarExport
+
+mountGutterExport :: EffectFn2 Foreign GT.GutterProps Unit
+mountGutterExport = GT.mountGutterExport
+
+mountCellHeadExport :: EffectFn2 Foreign CC.HeadProps Unit
+mountCellHeadExport = CC.mountCellHeadExport
+
+mountDiagnosticsExport :: EffectFn2 Foreign (Array CC.Diag) Unit
+mountDiagnosticsExport = CC.mountDiagnosticsExport
+
+mountCodeFoldedBarExport :: EffectFn2 Foreign (Effect Unit) Unit
+mountCodeFoldedBarExport = CC.mountCodeFoldedBarExport
+
+mountFoldedPreviewExport :: EffectFn2 Foreign CC.FoldedProps Unit
+mountFoldedPreviewExport = CC.mountFoldedPreviewExport
+
+routeEvalResultsExport
+  :: EffectFn4 (Array RN.RunCellInfo) (Array RN.EvalOut) Int String RN.RouteResult
+routeEvalResultsExport = RN.routeEvalResultsExport
 
 renderDisplayIntoExport :: EffectFn3 Foreign Foreign Foreign Unit
 renderDisplayIntoExport = D.renderDisplayIntoExport
