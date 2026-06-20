@@ -16,6 +16,7 @@ module Main
   , renderDisplayIntoExport
   , mountSpreadsheetViewExport
   , mountToolbarExport
+  , mountGutterExport
   , main
   ) where
 
@@ -31,6 +32,7 @@ import Notebook
   , bindingNamesFromSource
   , cellPreviewLine
   )
+import Notebook.Gutter as GT
 import Notebook.Model as NM
 import Notebook.Toolbar as TB
 import Seed (seedSignature)
@@ -117,6 +119,9 @@ mountSpreadsheetViewExport = SS.mountSpreadsheetViewExport
 
 mountToolbarExport :: EffectFn2 Foreign TB.ToolbarProps Unit
 mountToolbarExport = TB.mountToolbarExport
+
+mountGutterExport :: EffectFn2 Foreign GT.GutterProps Unit
+mountGutterExport = GT.mountGutterExport
 
 renderDisplayIntoExport :: EffectFn3 Foreign Foreign Foreign Unit
 renderDisplayIntoExport = D.renderDisplayIntoExport

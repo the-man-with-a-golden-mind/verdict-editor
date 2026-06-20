@@ -53,6 +53,43 @@ async function run(url, browser) {
   const cellCount = await page.evaluate(() => document.querySelectorAll("[data-cell-id]").length);
   ok(cellCount >= 2, `default example renders >= 2 cells (got ${cellCount})`);
 
+  // Cell gutter renders from the PureScript ps-spa component (mounted via rAF).
+  await page.waitForSelector('[data-cell-id] [data-run-cell]', { timeout: 10000 });
+  const gutter = await page.evaluate(() => {
+    const cell = [...document.querySelectorAll('[data-cell-id]')].find((c) => c.querySelector('[data-run-cell]'));
+    if (!cell) return null;
+    return {
+      id: cell.dataset.cellId,
+      run: !!cell.querySelector('[data-run-cell]'),
+      menu: !!cell.querySelector('[data-cell-menu]'),
+      actions: !!cell.querySelector('[data-cell-actions]'),
+      foldIcons: [...cell.querySelectorAll('.notebook-cell-gutter .notebook-gutter-btn')].map((b) => b.textContent?.trim()),
+    };
+  });
+  ok(gutter?.run, "gutter has run button");
+  ok(gutter?.menu, "gutter has ⋯ overflow menu");
+  ok(gutter?.foldIcons?.some((t) => t === "▾" || t === "▸"), "gutter has fold-all icon");
+  ok(gutter?.foldIcons?.includes("{}"), "gutter has fold-code icon");
+
+  // Fold-all icon toggles the cell to a folded preview, then back.
+  await page.evaluate((id) => {
+    const cell = document.querySelector(`[data-cell-id="${id}"]`);
+    const btn = [...cell.querySelectorAll('.notebook-cell-gutter .notebook-gutter-btn')].find((b) => b.textContent?.trim() === "▾");
+    btn?.click();
+  }, gutter.id);
+  await delay(300);
+  const foldedAfter = await page.evaluate((id) => {
+    const fresh = document.querySelector(`[data-cell-id="${id}"]`);
+    return fresh?.classList.contains("notebook-cell--folded");
+  }, gutter.id);
+  ok(foldedAfter, "fold-all icon collapses the cell");
+  await page.evaluate((id) => {
+    const cell = document.querySelector(`[data-cell-id="${id}"]`);
+    const btn = [...cell.querySelectorAll('.notebook-cell-gutter .notebook-gutter-btn')].find((b) => b.textContent?.trim() === "▸");
+    btn?.click();
+  }, gutter.id);
+  await delay(200);
+
   // Run all → charts render.
   await page.evaluate(() => {
     const btn = [...document.querySelectorAll(".notebook-toolbar-host button")].find((b) => b.textContent?.trim() === "Run all");

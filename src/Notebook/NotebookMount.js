@@ -78,18 +78,6 @@ function persist(state, bridge) {
   });
 }
 
-function mkGutterBtn(title, label, extraClass, dataAttr) {
-  const b = document.createElement("button");
-  b.type = "button";
-  b.title = title;
-  b.className =
-    "notebook-gutter-btn flex h-7 w-7 shrink-0 items-center justify-center rounded border border-slate-700/80 bg-slate-900/80 text-[11px] font-bold text-slate-400 transition-colors hover:border-slate-500 hover:text-white " +
-    (extraClass ?? "");
-  b.textContent = label;
-  if (dataAttr) b.dataset[dataAttr.key] = dataAttr.value;
-  return b;
-}
-
 function installVerticalResize(handle, getHeight, setHeight, { min = 72, max = 720 } = {}) {
   handle.addEventListener("mousedown", (event) => {
     event.preventDefault();
@@ -108,27 +96,6 @@ function installVerticalResize(handle, getHeight, setHeight, { min = 72, max = 7
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
   });
-}
-
-function mkGutterRunBtn(cell, idx, onRun, onStop, isRunning) {
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.dataset.runCell = "1";
-  const base =
-    "notebook-gutter-btn notebook-gutter-run flex h-8 w-8 shrink-0 items-center justify-center rounded border text-[14px] leading-none shadow-sm transition-colors ";
-  if (isRunning) {
-    btn.title = "Stop cell";
-    btn.dataset.cellState = "running";
-    btn.className = base + "border-rose-500/60 bg-rose-500/25 text-rose-200 hover:border-rose-400 hover:bg-rose-500/40";
-    btn.textContent = "■";
-    btn.onclick = () => onStop(cell, idx);
-  } else {
-    btn.title = "Run cell (⌘↵)";
-    btn.className = base + "border-emerald-500/50 bg-emerald-500/20 text-emerald-300 hover:border-emerald-400 hover:bg-emerald-500/35 hover:text-emerald-100";
-    btn.textContent = "▶";
-    btn.onclick = () => void onRun(cell, idx);
-  }
-  return btn;
 }
 
 async function renderOutputBlock(block, o, bridge) {
@@ -1009,121 +976,67 @@ export function mountNotebookImpl(selector) {
           return outputKeysForCell(cell).some((n) => state.outputs[`${cell.id}:${n}`]) || Boolean(state.errors[cell.id]);
         }
 
-        // A single "⋯" overflow menu holds every secondary action, so the gutter
-        // stays just [number] [Run]. Native <details> = no click-outside JS.
-        function buildCellMenu(cell, idx, ui, isCodeCell, isMax) {
-          const details = document.createElement("details");
-          details.className = "notebook-cell-menu relative";
-          const summary = document.createElement("summary");
-          summary.dataset.cellMenu = "1";
-          summary.title = "Cell actions";
-          summary.className =
-            "notebook-gutter-btn flex h-7 w-7 cursor-pointer list-none items-center justify-center rounded border border-slate-700/80 bg-slate-900/80 text-[13px] font-bold text-slate-400 hover:border-slate-500 hover:text-white";
-          summary.textContent = "⋯";
-          details.appendChild(summary);
+        // Build the "⋯" overflow menu item list as plain data; the PureScript
+        // gutter component renders the native <details> wrapper + buttons.
+        function buildCellMenuItems(cell, idx, ui, isCodeCell, isMax) {
+          const items = [];
+          const add = (label, onClick, opts = {}) =>
+            items.push({ label, onClick, danger: !!opts.danger, sepBefore: !!opts.sepBefore });
 
-          const menu = document.createElement("div");
-          menu.dataset.cellActions = "1";
-          menu.className =
-            "notebook-cell-actions absolute left-9 top-0 z-30 flex w-44 flex-col rounded border border-slate-700 bg-slate-900 p-1 text-left shadow-xl";
-
-          const item = (label, fn, extra) => {
-            const b = document.createElement("button");
-            b.type = "button";
-            b.className = "rounded px-2 py-1 text-left text-xs text-slate-300 hover:bg-slate-800 " + (extra ?? "");
-            b.textContent = label;
-            b.onclick = () => {
-              details.open = false;
-              fn();
-            };
-            menu.appendChild(b);
-            return b;
-          };
-          const sep = () => {
-            const d = document.createElement("div");
-            d.className = "my-1 border-t border-slate-800";
-            menu.appendChild(d);
-          };
-
-          // Fold and Hide-output are gutter icons (see appendCellGutterControls).
-          if (isRunnableCell(cell) && idx > 0) item("Run above", () => void runAbove(idx));
-          if (isCodeCell) item("Save file", () => downloadCellFile(cell));
-          item(isMax ? "Minimize" : "Maximize", () => {
+          if (isRunnableCell(cell) && idx > 0) add("Run above", () => void runAbove(idx));
+          if (isCodeCell) add("Save file", () => downloadCellFile(cell));
+          add(isMax ? "Minimize" : "Maximize", () => {
             updateNotebook({ tag: "maximize", id: cell.id });
             render();
           });
-          sep();
-          item("Insert code below", () => addCellBelow(idx, "code"));
-          item("Insert text below", () => addCellBelow(idx, "wysiwyg"));
-          if (idx > 0) item("Move up", () => moveCellBy(idx, -1));
-          if (idx < state.cells.length - 1) item("Move down", () => moveCellBy(idx, 1));
-          sep();
-          item("Delete cell", () => deleteCellAt(idx), "text-rose-300 hover:bg-rose-500/10");
+          add("Insert code below", () => addCellBelow(idx, "code"), { sepBefore: true });
+          add("Insert text below", () => addCellBelow(idx, "wysiwyg"));
+          if (idx > 0) add("Move up", () => moveCellBy(idx, -1));
+          if (idx < state.cells.length - 1) add("Move down", () => moveCellBy(idx, 1));
+          add("Delete cell", () => deleteCellAt(idx), { sepBefore: true, danger: true });
 
-          details.appendChild(menu);
-          return details;
+          return items;
         }
 
+        // Render the gutter via the PureScript ps-spa component. The Model owns
+        // the fold/run/number state; JS supplies action thunks (Effect Unit).
         function appendCellGutterControls(gutter, cell, idx, ui, isCodeCell, isMax) {
-          const num = document.createElement("span");
-          num.className = "whitespace-nowrap text-[10px] font-mono text-slate-500";
+          const mountGutter = globalThis.__notebookMountGutter;
           const executionCount = state.executionCounts[cell.id];
-          num.textContent = isRunnableCell(cell) ? `In [${executionCount ?? " "}]:` : `[${idx + 1}]`;
-          gutter.appendChild(num);
+          const number = isRunnableCell(cell)
+            ? `In [${executionCount ?? " "}]:`
+            : `[${idx + 1}]`;
 
-          if (isRunnableCell(cell))
-            gutter.appendChild(
-              mkGutterRunBtn(cell, idx, runCell, stopCell, state.running.has(cell.id)),
-            );
-
-          const activeClass = "border-indigo-400/60 bg-indigo-500/10 text-indigo-200";
-
-          // Fold ALL (code + output) — collapse the cell to its preview line.
-          const foldBtn = mkGutterBtn(
-            ui.folded ? "Expand cell" : "Fold all (code + output)",
-            ui.folded ? "▸" : "▾",
-            ui.folded ? activeClass : "",
-            { key: "foldCell", value: cell.id },
-          );
-          foldBtn.onclick = () => {
-            const willExpand = ui.folded;
-            updateNotebook({ tag: "toggleFold", id: cell.id });
-            if (willExpand && cell.kind === "code") {
-              updateNotebook({ tag: "focus", id: cell.id });
-            }
-            void patchCellDom(cell.id);
-          };
-          gutter.appendChild(foldBtn);
-
-          if (isCodeCell && !ui.folded) {
-            // Fold just the CODE (keep output visible).
-            const codeBtn = mkGutterBtn(
-              ui.codeFolded ? "Show code" : "Fold code",
-              "{}",
-              ui.codeFolded ? activeClass : "",
-              { key: "codeToggle", value: cell.id },
-            );
-            codeBtn.onclick = () => {
+          const props = {
+            number,
+            isRunnable: isRunnableCell(cell),
+            isRunning: state.running.has(cell.id),
+            isCodeCell,
+            folded: !!ui.folded,
+            codeFolded: !!ui.codeFolded,
+            outputFolded: !!ui.outputFolded,
+            onRun: () => void runCell(cell, idx),
+            onStop: () => stopCell(cell, idx),
+            onToggleFold: () => {
+              const willExpand = ui.folded;
+              updateNotebook({ tag: "toggleFold", id: cell.id });
+              if (willExpand && cell.kind === "code") {
+                updateNotebook({ tag: "focus", id: cell.id });
+              }
+              void patchCellDom(cell.id);
+            },
+            onToggleCodeFold: () => {
               updateNotebook({ tag: "toggleCodeFold", id: cell.id });
               void patchCellDom(cell.id);
-            };
-            gutter.appendChild(codeBtn);
-
-            // Fold just the OUTPUT (keep code visible).
-            const outBtn = mkGutterBtn(
-              ui.outputFolded ? "Show output" : "Fold output",
-              ui.outputFolded ? "▢" : "▣",
-              ui.outputFolded ? activeClass : "",
-              { key: "outputToggle", value: cell.id },
-            );
-            outBtn.onclick = () => {
+            },
+            onToggleOutputFold: () => {
               updateNotebook({ tag: "toggleOutputFold", id: cell.id });
               void patchCellDom(cell.id);
-            };
-            gutter.appendChild(outBtn);
-          }
+            },
+            menu: buildCellMenuItems(cell, idx, ui, isCodeCell, isMax),
+          };
 
-          gutter.appendChild(buildCellMenu(cell, idx, ui, isCodeCell, isMax));
+          if (mountGutter) mountGutter(gutter, props);
         }
 
         async function renderFoldedCell(wrap, cell, idx, ui, isCodeCell, isMax) {
