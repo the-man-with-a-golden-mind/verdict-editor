@@ -18,6 +18,7 @@ import {
   bindingNamesForCell,
   cellPreviewLine,
   updateModel,
+  routeEvalResults,
 } from "./NotebookPs.js";
 import {
   buildNotebookProgramSource,
@@ -247,26 +248,33 @@ export function mountNotebookImpl(selector) {
 
         const defaultSeed = parseInitialSeed(initialSource || "");
 
+        // Output routing is decided in PureScript (Notebook.Run.routeEvalResults);
+        // JS only applies the chosen targets to the outputs/errors maps and the
+        // opaque output payloads.
         function applyEvalResults(outs, upToIdx, focusCellId) {
-          const focusCell = state.cells[upToIdx];
-          const focusNames = focusCell ? bindingNamesForRun(focusCell) : [];
-          let matchedCurrent = false;
-          for (const o of outs) {
-            for (let i = 0; i <= upToIdx; i++) {
-              const c = state.cells[i];
-              if (!isRunnableCell(c)) continue;
-              if (!bindingNamesForRun(c).includes(o.name)) continue;
-              state.outputs[`${c.id}:${o.name}`] = o;
-              state.errors[c.id] = o.ok ? "" : o.error || "";
-              if (c.id === focusCellId) matchedCurrent = true;
-              break;
-            }
+          const cellInfo = state.cells.map((c) => ({
+            id: c.id,
+            runnable: isRunnableCell(c),
+            names: bindingNamesForRun(c),
+          }));
+          const { targetIds, fallbackName, fallbackCellId } = routeEvalResults(
+            cellInfo,
+            outs.map((o) => ({ name: o.name })),
+            upToIdx,
+            focusCellId,
+          );
+          for (let i = 0; i < outs.length; i++) {
+            const targetId = targetIds[i];
+            if (!targetId) continue;
+            const o = outs[i];
+            state.outputs[`${targetId}:${o.name}`] = o;
+            state.errors[targetId] = o.ok ? "" : o.error || "";
           }
-          if (focusNames.length > 0 && !matchedCurrent) {
-            const errOut = outs.find((o) => focusNames.includes(o.name));
-            if (errOut && focusCell) {
-              state.outputs[`${focusCell.id}:${errOut.name}`] = errOut;
-              state.errors[focusCell.id] = errOut.error || "";
+          if (fallbackCellId && fallbackName) {
+            const errOut = outs.find((o) => o.name === fallbackName);
+            if (errOut) {
+              state.outputs[`${fallbackCellId}:${errOut.name}`] = errOut;
+              state.errors[fallbackCellId] = errOut.error || "";
             }
           }
         }

@@ -21,6 +21,7 @@ export {
   mountDiagnosticsExport,
   mountCodeFoldedBarExport,
   mountFoldedPreviewExport,
+  routeEvalResultsExport,
 } from "./output/Main/index.js";
 
 export { decodeDisplay, renderDisplayInto } from "./Display.js";

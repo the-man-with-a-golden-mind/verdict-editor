@@ -21,6 +21,7 @@ module Main
   , mountDiagnosticsExport
   , mountCodeFoldedBarExport
   , mountFoldedPreviewExport
+  , routeEvalResultsExport
   , main
   ) where
 
@@ -39,13 +40,14 @@ import Notebook
 import Notebook.CellChrome as CC
 import Notebook.Gutter as GT
 import Notebook.Model as NM
+import Notebook.Run as RN
 import Notebook.Toolbar as TB
 import Seed (seedSignature)
 import Spreadsheet as SS
 import VerdictDocs (DocEntry, extractVerdictDocs)
 import Data.Maybe (Maybe(..))
 import Effect (Effect)
-import Effect.Uncurried (EffectFn1, EffectFn2, EffectFn3, mkEffectFn1, mkEffectFn2, mkEffectFn3)
+import Effect.Uncurried (EffectFn1, EffectFn2, EffectFn3, EffectFn4, mkEffectFn1, mkEffectFn2, mkEffectFn3)
 import Foreign (Foreign)
 
 foreign import mountNotebookImpl :: String -> Foreign -> String -> Effect Foreign
@@ -139,6 +141,10 @@ mountCodeFoldedBarExport = CC.mountCodeFoldedBarExport
 
 mountFoldedPreviewExport :: EffectFn2 Foreign CC.FoldedProps Unit
 mountFoldedPreviewExport = CC.mountFoldedPreviewExport
+
+routeEvalResultsExport
+  :: EffectFn4 (Array RN.RunCellInfo) (Array RN.EvalOut) Int String RN.RouteResult
+routeEvalResultsExport = RN.routeEvalResultsExport
 
 renderDisplayIntoExport :: EffectFn3 Foreign Foreign Foreign Unit
 renderDisplayIntoExport = D.renderDisplayIntoExport

@@ -1,5 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { routeEvalResults as psRouteEvalResults } from "../src/Notebook/output/Notebook.Run/index.js";
+
+const routeEvalResults = (cells, outs, upToIdx, focusId) =>
+  psRouteEvalResults(cells)(outs)(upToIdx)(focusId);
 
 function concatenateCode(cells) {
   return cells
@@ -84,6 +88,39 @@ test("CSV serialization escapes commas quotes newlines", () => {
   ]);
   assert.match(csv, /"say ""hi"", friend"/);
   assert.match(csv, /"line1\nline2"/);
+});
+
+test("routeEvalResults routes each output to its owning runnable cell", () => {
+  const cells = [
+    { id: "c1", runnable: true, names: ["x"] },
+    { id: "c2", runnable: true, names: ["y"] },
+  ];
+  const r = routeEvalResults(cells, [{ name: "x" }, { name: "y" }], 1, "c2");
+  assert.deepEqual(r.targetIds, ["c1", "c2"]);
+  assert.equal(r.fallbackCellId, null);
+  assert.equal(r.fallbackName, null);
+});
+
+test("routeEvalResults ignores non-runnable cells and unknown names", () => {
+  const cells = [
+    { id: "m", runnable: false, names: ["helper"] },
+    { id: "c1", runnable: true, names: ["x"] },
+  ];
+  const r = routeEvalResults(cells, [{ name: "helper" }, { name: "zzz" }], 1, "c1");
+  assert.deepEqual(r.targetIds, [null, null]);
+});
+
+test("routeEvalResults applies focus fallback when an earlier cell shares a name", () => {
+  // c1 and c2 both own "x"; primary routing assigns "x" to c1 (first match),
+  // so c2 (the just-run focus cell) matched nothing -> fallback fires for it.
+  const cells = [
+    { id: "c1", runnable: true, names: ["x"] },
+    { id: "c2", runnable: true, names: ["x"] },
+  ];
+  const r = routeEvalResults(cells, [{ name: "x" }], 1, "c2");
+  assert.deepEqual(r.targetIds, ["c1"]);
+  assert.equal(r.fallbackCellId, "c2");
+  assert.equal(r.fallbackName, "x");
 });
 
 test("binding name scan by decl name", () => {

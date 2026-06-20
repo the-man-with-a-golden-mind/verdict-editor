@@ -9,6 +9,7 @@ import {
   cellPreviewLine as psCellPreviewLine,
 } from "../Notebook/index.js";
 import { updateJsModel } from "../Notebook.Model/index.js";
+import { routeEvalResults as psRouteEvalResults } from "../Notebook.Run/index.js";
 import { seedSignature } from "../Seed/index.js";
 import { extractVerdictDocs } from "../VerdictDocs/index.js";
 
@@ -83,6 +84,15 @@ export function normalizeCellUi(ui) {
     editorResized: Boolean(ui?.editorResized),
     outputHeight: Number.isFinite(ui?.outputHeight) ? Math.round(ui.outputHeight) : 180,
   };
+}
+
+/**
+ * Pure eval-output routing (Notebook.Run.routeEvalResults). `cells` are
+ * { id, runnable, names }, `outs` are eval results (only `name` is read).
+ * Returns { targetIds: (string|null)[], fallbackName, fallbackCellId }.
+ */
+export function routeEvalResults(cells, outs, upToIdx, focusCellId) {
+  return psRouteEvalResults(cells)(outs)(upToIdx)(focusCellId);
 }
 
 export function updateModel(model, msg) {
