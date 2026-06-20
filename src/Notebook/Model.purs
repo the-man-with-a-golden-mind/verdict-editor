@@ -44,6 +44,9 @@ data Msg
 type JsCell =
   { id :: String
   , kind :: String
+  , role :: String
+  , path :: String
+  , moduleName :: String
   , source :: String
   , ui :: CellUi
   }
@@ -203,6 +206,9 @@ emptyCodeCell :: Cell
 emptyCodeCell =
   { id: ""
   , kind: Code
+  , role: "runnable"
+  , path: ""
+  , moduleName: "Main"
   , source: ""
   , ui: defaultCellUi
   }
@@ -247,6 +253,9 @@ jsToCell :: JsCell -> Cell
 jsToCell cell =
   { id: cell.id
   , kind: kindFromString cell.kind
+  , role: cell.role
+  , path: cell.path
+  , moduleName: cell.moduleName
   , source: cell.source
   , ui: cell.ui
   }
@@ -255,6 +264,9 @@ cellToJs :: Cell -> JsCell
 cellToJs cell =
   { id: cell.id
   , kind: kindToString cell.kind
+  , role: cell.role
+  , path: cell.path
+  , moduleName: cell.moduleName
   , source: cell.source
   , ui: cell.ui
   }

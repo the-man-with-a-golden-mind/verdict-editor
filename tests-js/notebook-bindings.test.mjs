@@ -106,15 +106,17 @@ test("verdict-notebook: evalBindingsJsonJS returns structured json", async () =>
   assert.equal(out[0].json?.int, "42");
 });
 
+import { DEFAULT_NOTEBOOK_DECISION_CELL_LINES } from "../src/editor/defaultNotebookDecisionCell.mjs";
 import { DEFAULT_NOTEBOOK_SIM_CELL_LINES } from "../src/editor/defaultNotebookSimCell.mjs";
+import { buildNotebookProgramSource } from "../src/editor/notebookProject.mjs";
 
 function defaultExampleProgramFromEditor() {
-  const ts = fs.readFileSync(path.join(root, "src/VerdictEditor.ts"), "utf8");
-  const m = ts.match(/const DEFAULT_NOTEBOOK_CELL_1 = \[([\s\S]*?)\];/);
-  if (!m) throw new Error("DEFAULT_NOTEBOOK_CELL_1 array not found in VerdictEditor.ts");
-  const cell1 = eval("[" + m[1] + "]").join("\n");
-  const cell2 = DEFAULT_NOTEBOOK_SIM_CELL_LINES.join("\n");
-  return cell1 + "\n" + cell2;
+  const market = fs.readFileSync(path.join(root, "lib/verdict/Market.verdict"), "utf8");
+  return buildNotebookProgramSource([
+    { id: "market", kind: "code", role: "module", moduleName: "Market", path: "Market.verdict", source: market },
+    { id: "main", kind: "code", role: "runnable", moduleName: "Main", path: "Main.verdict", source: DEFAULT_NOTEBOOK_DECISION_CELL_LINES.join("\n") },
+    { id: "sim", kind: "code", role: "runnable", moduleName: "Backtest", path: "Backtest.verdict", source: DEFAULT_NOTEBOOK_SIM_CELL_LINES.join("\n") },
+  ]);
 }
 
 function materializeDefaultInputs(source) {

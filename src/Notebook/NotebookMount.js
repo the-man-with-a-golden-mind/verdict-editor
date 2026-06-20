@@ -19,10 +19,25 @@ import {
   cellPreviewLine,
   updateModel,
 } from "./NotebookPs.js";
+import {
+  buildNotebookProgramSource,
+  buildRunnableCellSource,
+  isModuleCell,
+  isRunnableCell,
+  normalizeCellMeta,
+  projectCellLabel,
+} from "./NotebookProject.js";
 
 function makeBindingHelpers(bridge) {
   function bindingNamesForCellBridge(cell, allCells, getSource) {
-    const cells = allCells.map((c) => ({ id: c.id, kind: c.kind, source: c.source }));
+    const cells = allCells.map((c) => ({
+      id: c.id,
+      kind: c.kind,
+      role: c.role,
+      path: c.path,
+      moduleName: c.moduleName,
+      source: c.source,
+    }));
     if (bridge?.bindingNamesInCell) {
       return bridge.bindingNamesInCell(cell.id, cells, getSource());
     }
@@ -54,6 +69,9 @@ function persist(state, bridge) {
     cells: state.cells.map((c) => ({
       id: c.id,
       kind: c.kind,
+      role: c.role,
+      path: c.path,
+      moduleName: c.moduleName,
       source: c.source,
       ui: c.ui,
     })),
@@ -157,10 +175,14 @@ export function mountNotebookImpl(selector) {
         const newId = () => `cell-${++seq}-${Math.random().toString(36).slice(2, 6)}`;
 
         function mapLoadedCell(c) {
+          const meta = normalizeCellMeta(c);
           return {
             id: c.id || newId(),
-            kind: c.kind === "wysiwyg" ? "wysiwyg" : "code",
-            source: c.source ?? "",
+            kind: meta.kind,
+            role: meta.role,
+            path: meta.path,
+            moduleName: meta.moduleName,
+            source: meta.source,
             ui: { ...defaultCellUi(), ...c.ui },
           };
         }
@@ -168,8 +190,7 @@ export function mountNotebookImpl(selector) {
         function cellsFromSources(sources) {
           return sources.map((s) => ({
             id: newId(),
-            kind: "code",
-            source: s,
+            ...normalizeCellMeta({ kind: "code", source: s }),
             ui: defaultCellUi(),
           }));
         }
@@ -179,6 +200,9 @@ export function mountNotebookImpl(selector) {
             cells: state.cells.map((c) => ({
               id: c.id,
               kind: c.kind === "wysiwyg" ? "wysiwyg" : "code",
+              role: c.role,
+              path: c.path,
+              moduleName: c.moduleName,
               source: c.source ?? "",
               ui: { ...defaultCellUi(), ...c.ui },
             })),
@@ -263,7 +287,7 @@ export function mountNotebookImpl(selector) {
           for (const o of outs) {
             for (let i = 0; i <= upToIdx; i++) {
               const c = state.cells[i];
-              if (c.kind !== "code") continue;
+              if (!isRunnableCell(c)) continue;
               if (!bindingNamesForRun(c).includes(o.name)) continue;
               state.outputs[`${c.id}:${o.name}`] = o;
               state.errors[c.id] = o.ok ? "" : o.error || "";
@@ -282,7 +306,7 @@ export function mountNotebookImpl(selector) {
 
         async function evalCellOutputs(cell, cellIdx, signal) {
           const cellNames = bindingNamesForRun(cell);
-          const src = getBridgeSource();
+          const src = getBridgeSourceForCell(cell);
           const chk = bridge.compileCellBindings?.(src, cellNames) ?? bridge.compile?.(src);
           if (chk && !chk.ok) {
             throw new Error(chk.error ?? "Compile failed");
@@ -296,7 +320,7 @@ export function mountNotebookImpl(selector) {
         }
 
         function concatenate() {
-          return concatCode(state.cells);
+          return buildNotebookProgramSource(state.cells);
         }
 
         function concatenateDocument() {
@@ -346,7 +370,14 @@ export function mountNotebookImpl(selector) {
           if (state.analysisSig === sig) return;
           state.analysisSig = sig;
 
-          const cells = state.cells.map((c) => ({ id: c.id, kind: c.kind, source: c.source }));
+          const cells = state.cells.map((c) => ({
+            id: c.id,
+            kind: c.kind,
+            role: c.role,
+            path: c.path,
+            moduleName: c.moduleName,
+            source: c.source,
+          }));
           state.cellDiags = bridge.cellDiagnostics?.(src, cells) ?? {};
 
           try {
@@ -453,7 +484,7 @@ export function mountNotebookImpl(selector) {
           setSource: (src) => {
             updateNotebook({
               tag: "replaceOne",
-              cell: { id: newId(), kind: "code", source: src || "", ui: defaultCellUi() },
+              cell: { id: newId(), ...normalizeCellMeta({ kind: "code", source: src || "" }), ui: defaultCellUi() },
             });
             publishSource();
             render();
@@ -476,6 +507,9 @@ export function mountNotebookImpl(selector) {
             state.cells.map((c) => ({
               id: c.id,
               kind: c.kind,
+              role: c.role,
+              path: c.path,
+              moduleName: c.moduleName,
               source: c.source ?? "",
             })),
         };
@@ -519,6 +553,9 @@ export function mountNotebookImpl(selector) {
             cells: state.cells.map((c) => ({
               id: c.id,
               kind: c.kind,
+              role: c.role,
+              path: c.path,
+              moduleName: c.moduleName,
               source: c.source,
               ui: c.ui,
             })),
@@ -528,6 +565,18 @@ export function mountNotebookImpl(selector) {
           const a = document.createElement("a");
           a.href = url;
           a.download = "notebook.vnb";
+          a.click();
+          URL.revokeObjectURL(url);
+        }
+
+        function downloadCellFile(cell) {
+          const meta = normalizeCellMeta(cell);
+          const filename = meta.path || `${cell.id}.${cell.kind === "wysiwyg" ? "md" : "verdict"}`;
+          const blob = new Blob([cell.source ?? ""], { type: "text/plain" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = filename.split("/").filter(Boolean).pop() || "cell.verdict";
           a.click();
           URL.revokeObjectURL(url);
         }
@@ -557,7 +606,7 @@ export function mountNotebookImpl(selector) {
           }
           updateNotebook({
             tag: "replaceOne",
-            cell: { id: newId(), kind: "code", source: text, ui: defaultCellUi() },
+            cell: { id: newId(), ...normalizeCellMeta({ kind: "code", source: text, path: file.name }), ui: defaultCellUi() },
           });
           publishSource();
           render();
@@ -588,8 +637,15 @@ export function mountNotebookImpl(selector) {
           return bridge.materialize?.(concatenate()) ?? concatenate();
         }
 
+        function getBridgeSourceForCell(cell) {
+          const src = buildRunnableCellSource(cell, state.cells);
+          return bridge.materialize?.(src, { id: cell.id, index: state.cells.indexOf(cell) }) ?? src;
+        }
+
         function bindingNamesForRun(cell) {
-          const fromBridge = bindingNamesForCell(cell, state.cells, concatenate);
+          if (!isRunnableCell(cell)) return [];
+          const sourceForCell = () => buildRunnableCellSource(cell, state.cells);
+          const fromBridge = bindingNamesForCell(cell, state.cells, sourceForCell);
           if (fromBridge.length > 0) return fromBridge;
           return scanBindingNames(cell.source);
         }
@@ -603,7 +659,7 @@ export function mountNotebookImpl(selector) {
         }
 
         async function runCell(cell, cellIdx) {
-          if (cell.kind !== "code") return;
+          if (!isRunnableCell(cell)) return;
           if (state.running.has(cell.id)) return;
           syncSharedEditorSource();
           const controller = new AbortController();
@@ -658,7 +714,7 @@ export function mountNotebookImpl(selector) {
 
         // --- Cell management (operate on whole cell objects so `ui` is preserved) ---
         function addCellBelow(idx, kind) {
-          const cell = { id: newId(), kind: kind === "wysiwyg" ? "wysiwyg" : "code", source: "", ui: defaultCellUi() };
+          const cell = { id: newId(), ...normalizeCellMeta({ kind: kind === "wysiwyg" ? "wysiwyg" : "code", source: "" }), ui: defaultCellUi() };
           const anchor = state.cells[idx];
           updateNotebook({ tag: "insertBelow", id: anchor?.id ?? "", cell });
           publishSource();
@@ -680,8 +736,7 @@ export function mountNotebookImpl(selector) {
         function cloneCellForPaste(cell) {
           return {
             id: newId(),
-            kind: cell.kind === "wysiwyg" ? "wysiwyg" : "code",
-            source: cell.source ?? "",
+            ...normalizeCellMeta(cell),
             ui: cell.ui ? { ...defaultCellUi(), ...cell.ui } : defaultCellUi(),
           };
         }
@@ -698,7 +753,7 @@ export function mountNotebookImpl(selector) {
           updateNotebook({
             tag: "deleteCell",
             id: removedId,
-            fallbackCell: { id: newId(), kind: "code", source: "", ui: defaultCellUi() },
+            fallbackCell: { id: newId(), ...normalizeCellMeta({ kind: "code", source: "" }), ui: defaultCellUi() },
           });
           publishSource();
           if (canIncrementalDom()) {
@@ -936,7 +991,7 @@ export function mountNotebookImpl(selector) {
             sections.push({
               cellIndex: i,
               cellId: cell.id,
-              kind: cell.kind === "wysiwyg" ? "text" : "code",
+              kind: cell.kind === "wysiwyg" ? "text" : isModuleCell(cell) ? "module" : "code",
               preview: getCellPreviewLine(cell),
               running: state.running.has(cell.id),
               focused: state.focusedId === cell.id,
@@ -991,7 +1046,8 @@ export function mountNotebookImpl(selector) {
           };
 
           // Fold and Hide-output are gutter icons (see appendCellGutterControls).
-          if (isCodeCell && idx > 0) item("Run above", () => void runAbove(idx));
+          if (isRunnableCell(cell) && idx > 0) item("Run above", () => void runAbove(idx));
+          if (isCodeCell) item("Save file", () => downloadCellFile(cell));
           item(isMax ? "Minimize" : "Maximize", () => {
             updateNotebook({ tag: "maximize", id: cell.id });
             render();
@@ -1012,10 +1068,10 @@ export function mountNotebookImpl(selector) {
           const num = document.createElement("span");
           num.className = "whitespace-nowrap text-[10px] font-mono text-slate-500";
           const executionCount = state.executionCounts[cell.id];
-          num.textContent = isCodeCell ? `In [${executionCount ?? " "}]:` : `[${idx + 1}]`;
+          num.textContent = isRunnableCell(cell) ? `In [${executionCount ?? " "}]:` : `[${idx + 1}]`;
           gutter.appendChild(num);
 
-          if (isCodeCell)
+          if (isRunnableCell(cell))
             gutter.appendChild(
               mkGutterRunBtn(cell, idx, runCell, stopCell, state.running.has(cell.id)),
             );
@@ -1150,7 +1206,7 @@ export function mountNotebookImpl(selector) {
           const cellKind = document.createElement("span");
           cellKind.className =
             "ml-3 shrink-0 rounded border border-slate-700 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-500";
-          cellKind.textContent = cell.kind === "wysiwyg" ? "Markdown" : "Code";
+          cellKind.textContent = projectCellLabel(cell);
           cellHead.appendChild(cellTitle);
           cellHead.appendChild(cellKind);
           body.appendChild(cellHead);
@@ -1409,12 +1465,12 @@ export function mountNotebookImpl(selector) {
         const onRun = () => {
           const idx = selectedIndex();
           const cell = state.cells[idx];
-          if (cell?.kind === "code") void runCell(cell, idx);
+          if (isRunnableCell(cell)) void runCell(cell, idx);
         };
 
         const onStop = () => {
           const cell = state.cells[selectedIndex()];
-          if (cell?.kind === "code") stopCell(cell);
+          if (isRunnableCell(cell)) stopCell(cell);
         };
 
         const onRunAll = () => runAll();
@@ -1451,10 +1507,11 @@ export function mountNotebookImpl(selector) {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
             e.preventDefault();
             const idx = state.cells.indexOf(focused);
-            void runCell(focused, idx >= 0 ? idx : 0);
+            if (isRunnableCell(focused)) void runCell(focused, idx >= 0 ? idx : 0);
           } else if (e.key === "Enter" && e.shiftKey) {
             e.preventDefault();
             const idx = state.cells.indexOf(focused);
+            if (!isRunnableCell(focused)) return;
             void runCell(focused, idx >= 0 ? idx : 0).then(() => {
               const nextIdx = state.cells.indexOf(focused);
               if (nextIdx >= 0 && nextIdx < state.cells.length - 1) {

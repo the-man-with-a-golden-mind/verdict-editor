@@ -83,6 +83,9 @@ foreignToCell :: Foreign -> Cell
 foreignToCell f =
   { id: unsafeReadString f "id"
   , kind: if unsafeReadString f "kind" == "wysiwyg" then Wysiwyg else Code
+  , role: unsafeReadString f "role"
+  , path: unsafeReadString f "path"
+  , moduleName: unsafeReadString f "moduleName"
   , source: unsafeReadString f "source"
   , ui: unsafeReadCellUi f
   }

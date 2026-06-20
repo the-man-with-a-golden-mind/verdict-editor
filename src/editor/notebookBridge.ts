@@ -10,13 +10,16 @@ export type CellOutput = {
 export type NotebookCellInfo = {
   id: string;
   kind: 'code' | 'wysiwyg';
+  role?: 'runnable' | 'module' | 'asset' | 'note';
+  path?: string;
+  moduleName?: string | null;
   source: string;
 };
 
 export type CellsNavSection = {
   cellIndex: number;
   cellId: string;
-  kind?: 'code' | 'text';
+  kind?: 'code' | 'text' | 'module' | 'asset';
   preview?: string;
   running?: boolean;
   focused?: boolean;
@@ -242,7 +245,7 @@ export async function loadNotebookLib() {
 }
 
 const VNB_STORAGE_KEY = 'verdict-notebook.vnb';
-const VNB_FORMAT_VERSION = 2;
+const VNB_FORMAT_VERSION = 3;
 
 export function loadVnbFromStorage(): { cells: NotebookCellInfo[]; seedSig?: string; formatVersion?: number } | null {
   try {

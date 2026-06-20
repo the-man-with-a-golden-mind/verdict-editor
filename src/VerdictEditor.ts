@@ -38,7 +38,9 @@ import {
 } from './editor/notebookEval';
 import { bindingNamesInCell as resolveNotebookBindingNames } from './editor/notebookBindings';
 import { materializeIdeCellPlaceholders } from './editor/ideSession';
+import { DEFAULT_NOTEBOOK_DECISION_CELL_LINES } from './editor/defaultNotebookDecisionCell.mjs';
 import { DEFAULT_NOTEBOOK_SIM_CELL_LINES } from './editor/defaultNotebookSimCell.mjs';
+import defaultMarketSource from '../lib/verdict/Market.verdict?raw';
 import { extractDocs, gasFromBytecode, renderCallGraph, type GasInfo } from './editor/vizGraph';
 import {
   cellVizPreview,
@@ -59,16 +61,31 @@ declare global {
 const FONT_MONO = "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
 
 /** Bump when default notebook cells change so stale localStorage is not reused. */
-const VNB_FORMAT_VERSION = 2;
+const VNB_FORMAT_VERSION = 3;
 
-function notebookSeedFromCells(cells: string[]): string {
-  const joined = cells.map((s) => s.trim()).filter(Boolean).join('\n\n');
+type NotebookSeedCell = {
+  source: string;
+  kind?: 'code' | 'wysiwyg';
+  role?: 'runnable' | 'module' | 'asset' | 'note';
+  path?: string;
+  moduleName?: string;
+};
+
+function notebookSeedFromCells(cells: Array<string | NotebookSeedCell>): string {
+  const normalized = cells.map((cell) => typeof cell === 'string' ? { source: cell } : cell);
+  const joined = normalized.map((c) => c.source.trim()).filter(Boolean).join('\n\n');
   let h = 5381;
   for (let i = 0; i < joined.length; i++) h = ((h << 5) + h + joined.charCodeAt(i)) | 0;
   return JSON.stringify({
     formatVersion: VNB_FORMAT_VERSION,
     seedSig: `${joined.length}:${h >>> 0}`,
-    cells: cells.map((source) => ({ source })),
+    cells: normalized.map((cell) => ({
+      kind: cell.kind ?? 'code',
+      role: cell.role,
+      path: cell.path,
+      moduleName: cell.moduleName,
+      source: cell.source,
+    })),
   });
 }
 
@@ -968,14 +985,33 @@ class VerdictEditorElement extends HTMLElement {
       ];
     const DEFAULT_NOTEBOOK_CELL_2 = DEFAULT_NOTEBOOK_SIM_CELL_LINES;
     const defaultNotebookCells = [
-      DEFAULT_NOTEBOOK_CELL_1.join('\n'),
-      DEFAULT_NOTEBOOK_CELL_2.join('\n'),
+      {
+        source: defaultMarketSource.trim(),
+        kind: 'code' as const,
+        role: 'module' as const,
+        path: 'Market.verdict',
+        moduleName: 'Market',
+      },
+      {
+        source: DEFAULT_NOTEBOOK_DECISION_CELL_LINES.join('\n'),
+        kind: 'code' as const,
+        role: 'runnable' as const,
+        path: 'Main.verdict',
+        moduleName: 'Main',
+      },
+      {
+        source: DEFAULT_NOTEBOOK_CELL_2.join('\n'),
+        kind: 'code' as const,
+        role: 'runnable' as const,
+        path: 'Backtest.verdict',
+        moduleName: 'Backtest',
+      },
     ];
     this.defaultNotebookSeed = notebookSeedFromCells(defaultNotebookCells);
 
     this.editor = createVerdictEditor(this.container, {
       variant: 'program',
-      value: defaultNotebookCells.join('\n\n'),
+      value: defaultNotebookCells.map((cell) => cell.source).join('\n\n'),
       languageService: this.programLanguageService(),
       onRun: () => this.run(),
       onChange: () => this.scheduleUpdate(),
@@ -1134,6 +1170,7 @@ class VerdictEditorElement extends HTMLElement {
     }
     for (const sec of sections) {
       const isText = sec.kind === 'text';
+      const isRunnable = sec.kind === 'code';
       const card = document.createElement('div');
       card.dataset.navCell = sec.cellId;
       card.className =
@@ -1148,7 +1185,8 @@ class VerdictEditorElement extends HTMLElement {
       const meta = document.createElement('div');
       meta.className = 'flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500';
       const num = document.createElement('span');
-      num.textContent = `${sec.cellIndex + 1} · ${isText ? 'Text' : 'Code'}`;
+      const label = sec.kind === 'module' ? 'Module' : isText ? 'Text' : sec.kind === 'asset' ? 'Asset' : 'Runnable';
+      num.textContent = `${sec.cellIndex + 1} · ${label}`;
       meta.appendChild(num);
       const prev = document.createElement('div');
       prev.className = 'truncate font-mono text-[11px] text-slate-300';
@@ -1157,7 +1195,7 @@ class VerdictEditorElement extends HTMLElement {
       navBtn.appendChild(prev);
       card.appendChild(navBtn);
 
-      if (!isText) {
+      if (isRunnable) {
         const runBtn = document.createElement('button');
         runBtn.type = 'button';
         runBtn.dataset.runCell = sec.cellId;

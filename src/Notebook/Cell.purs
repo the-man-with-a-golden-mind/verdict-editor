@@ -23,6 +23,9 @@ type CellUi =
 type Cell =
   { id :: String
   , kind :: CellKind
+  , role :: String
+  , path :: String
+  , moduleName :: String
   , source :: String
   , ui :: CellUi
   }

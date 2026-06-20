@@ -33,6 +33,7 @@ for (const f of fs.readdirSync(vcCanonical)) {
 const jsCopies = [
   "Main.js",
   "NotebookMount.js",
+  "NotebookProject.js",
   "NotebookPs.js",
   "WysiwygFFI.js",
   "Display.js",

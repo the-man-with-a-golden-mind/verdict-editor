@@ -77,7 +77,7 @@ test("integration: document source interleaves wysiwyg as comments", async () =>
 test("integration: PureScript model update handles cell operations", async () => {
   const mod = await import(pathToFileURL(path.join(root, "public/lib/notebook.mjs")).href);
   const ui = mod.defaultCellUiExport(undefined);
-  const cell = (id, kind = "code", source = "") => ({ id, kind, source, ui });
+  const cell = (id, kind = "code", source = "", cellUi = ui) => ({ id, kind, source, ui: cellUi });
   const msg = (patch) => ({
     tag: "",
     id: "",
@@ -114,4 +114,23 @@ test("integration: PureScript model update handles cell operations", async () =>
   assert.deepEqual(deleted.cells.map((c) => c.id), ["fallback"]);
   assert.equal(deleted.focusedId, "fallback");
   assert.equal(deleted.maximizedId, null);
+
+  const sourced = mod.updateModelExport(initial, msg({ tag: "setSource", id: "b", source: "b = 99" }));
+  assert.equal(sourced.cells.find((c) => c.id === "b")?.source, "b = 99");
+  assert.equal(sourced.focusedId, "a", "setSource must not steal focus");
+
+  const maxed = mod.updateModelExport(initial, msg({ tag: "maximize", id: "b" }));
+  assert.equal(maxed.maximizedId, "b");
+  const unmaxed = mod.updateModelExport(maxed, msg({ tag: "maximize", id: "b" }));
+  assert.equal(unmaxed.maximizedId, null);
+  assert.equal(unmaxed.focusedId, "b");
+
+  const resized = mod.updateModelExport(initial, msg({ tag: "setEditorHeight", id: "a", height: 12 }));
+  const resizedUi = resized.cells.find((c) => c.id === "a")?.ui;
+  assert.equal(resizedUi?.editorHeight, 48);
+  assert.equal(resizedUi?.editorResized, true);
+
+  const replacedEmpty = mod.updateModelExport(initial, msg({ tag: "replaceCells", cells: [] }));
+  assert.equal(replacedEmpty.cells.length, 1, "replaceCells keeps at least one cell");
+  assert.equal(replacedEmpty.cells[0].kind, "code");
 });

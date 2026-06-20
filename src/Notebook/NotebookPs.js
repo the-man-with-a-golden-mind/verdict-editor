@@ -18,6 +18,9 @@ export function toPsCell(c) {
     id: c.id ?? "",
     source: c.source ?? "",
     kind: c.kind === "wysiwyg" ? Wysiwyg.value : Code.value,
+    role: c.role ?? "",
+    path: c.path ?? "",
+    moduleName: c.moduleName ?? "",
     ui: normalizeCellUi(c.ui),
   };
 }
@@ -116,6 +119,9 @@ function completeCell(cell) {
   return {
     id: cell?.id ?? "",
     kind: cell?.kind === "wysiwyg" ? "wysiwyg" : "code",
+    role: cell?.role ?? "",
+    path: cell?.path ?? "",
+    moduleName: cell?.moduleName ?? "",
     source: cell?.source ?? "",
     ui: normalizeCellUi(cell?.ui),
   };

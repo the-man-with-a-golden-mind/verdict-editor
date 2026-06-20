@@ -14,6 +14,7 @@ const actorPath = path.join(root, "lib/verdict/Actor.verdict");
 const idePath = path.join(root, "lib/verdict/IDE.verdict");
 const cellBusPath = path.join(root, "lib/verdict/CellBus.verdict");
 const displayPath = path.join(root, "lib/verdict/Display.verdict");
+const marketPath = path.join(root, "lib/verdict/Market.verdict");
 const outPath = path.join(root, "public/lib/verdict-notebook.mjs");
 
 let code = fs.readFileSync(srcPath, "utf8");
