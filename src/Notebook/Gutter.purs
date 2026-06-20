@@ -31,6 +31,10 @@ type GutterProps =
   , isRunnable :: Boolean
   , isRunning :: Boolean
   , isCodeCell :: Boolean
+  -- | Per-cell status: "running" | "error" | "ok" | "idle". Drives the 3-color
+  -- | dot (orange/red/green/gray). Computed once in JS (cellStatus) so the
+  -- | gutter and the Cells nav agree.
+  , status :: String
   , folded :: Boolean
   , codeFolded :: Boolean
   , outputFolded :: Boolean
@@ -64,31 +68,58 @@ gutterBtn title label extra onClick =
     ]
     [ H.text label ]
 
-runBtn :: GutterProps -> H.Html (Effect Unit)
-runBtn props =
+-- | Map the per-cell status string to a Tailwind text color for the dot.
+-- | orange = running/looping, red = error, green = ok, gray = idle.
+statusDotClass :: String -> String
+statusDotClass status =
+  case status of
+    "running" -> "text-amber-400"
+    "error" -> "text-rose-400"
+    "ok" -> "text-emerald-400"
+    _ -> "text-slate-700"
+
+statusDot :: GutterProps -> H.Html (Effect Unit)
+statusDot props =
+  H.node "span"
+    [ H.className ("notebook-cell-status shrink-0 text-[12px] leading-none " <> statusDotClass props.status)
+    , H.dataAttr "cell-status" props.status
+    , H.titleAttr ("Status: " <> props.status)
+    ]
+    [ H.text "●" ]
+
+-- | Both Run and Stop are always visible (not a single toggle). Stop is dimmed
+-- | when the cell is neither running nor looping; Run dims while running so a
+-- | loop cell shows its active state without hiding the affordance.
+runBtns :: GutterProps -> Array (H.Html (Effect Unit))
+runBtns props =
   let
     base =
-      "notebook-gutter-btn notebook-gutter-run flex h-8 w-8 shrink-0 items-center justify-center rounded border text-[14px] leading-none shadow-sm transition-colors "
+      "notebook-gutter-btn flex h-8 w-8 shrink-0 items-center justify-center rounded border text-[14px] leading-none shadow-sm transition-colors "
+    runActive = "border-emerald-500/50 bg-emerald-500/20 text-emerald-300 hover:border-emerald-400 hover:bg-emerald-500/35 hover:text-emerald-100"
+    runDim = "border-slate-700/70 bg-slate-900/70 text-emerald-300/50 hover:border-emerald-400 hover:text-emerald-200"
+    stopActive = "border-rose-500/60 bg-rose-500/25 text-rose-200 hover:border-rose-400 hover:bg-rose-500/40"
+    stopDim = "border-slate-700/70 bg-slate-900/70 text-rose-300/40"
+    runCls = if props.isRunning then runDim else runActive
+    stopCls = if props.isRunning then stopActive else stopDim
   in
-    if props.isRunning then
-      H.button
-        [ H.className (base <> "border-rose-500/60 bg-rose-500/25 text-rose-200 hover:border-rose-400 hover:bg-rose-500/40")
+    [ H.button
+        [ H.className (base <> runCls)
         , H.attr "type" "button"
         , H.dataAttr "run-cell" "1"
-        , H.dataAttr "cell-state" "running"
-        , H.titleAttr "Stop cell"
-        , H.OnClick props.onStop
-        ]
-        [ H.text "■" ]
-    else
-      H.button
-        [ H.className (base <> "border-emerald-500/50 bg-emerald-500/20 text-emerald-300 hover:border-emerald-400 hover:bg-emerald-500/35 hover:text-emerald-100")
-        , H.attr "type" "button"
-        , H.dataAttr "run-cell" "1"
+        , H.dataAttr "cell-state" (if props.isRunning then "running" else "idle")
         , H.titleAttr "Run cell (⌘↵)"
         , H.OnClick props.onRun
         ]
         [ H.text "▶" ]
+    , H.button
+        [ H.className (base <> stopCls)
+        , H.attr "type" "button"
+        , H.dataAttr "stop-cell" "1"
+        , H.titleAttr "Stop cell"
+        , H.OnClick props.onStop
+        ]
+        [ H.text "■" ]
+    ]
 
 menuItemView :: MenuItem -> Array (H.Html (Effect Unit))
 menuItemView item =
@@ -133,7 +164,8 @@ viewGutter props =
           [ H.className "whitespace-nowrap text-[10px] font-mono text-slate-500" ]
           [ H.text props.number ]
       ]
-        <> (if props.isRunnable then [ runBtn props ] else [])
+        <> (if props.isRunnable then [ statusDot props ] else [])
+        <> (if props.isRunnable then runBtns props else [])
         <>
           [ gutterBtn
               (if props.folded then "Expand cell" else "Fold all (code + output)")

@@ -43,9 +43,9 @@ import { DEFAULT_NOTEBOOK_SIM_CELL_LINES } from './editor/defaultNotebookSimCell
 import defaultMarketSource from '../lib/verdict/Market.verdict?raw';
 import { extractDocs, gasFromBytecode, renderCallGraph, type GasInfo } from './editor/vizGraph';
 import {
-  cellVizPreview,
   collapsedDefKey,
-  wrapCellModule,
+  mappedCellForLine,
+  notebookCellsToVizModules,
   type VizNotebookCell,
 } from './editor/vizCells';
 
@@ -251,6 +251,7 @@ class VerdictEditorElement extends HTMLElement {
   private vizListenersAttached = false;
   private vizCleanup: (() => void) | null = null;
   private collapsedDefs = new Set<string>();
+  private collapsedVizModules = new Set<string>();
   private vizMode: 'blocks' | 'map' = 'blocks';
   private inputsPreview: HTMLDivElement | null = null;
   private inputsList: HTMLDivElement | null = null;
@@ -908,7 +909,10 @@ class VerdictEditorElement extends HTMLElement {
       navBtn.type = 'button';
       navBtn.className = 'flex min-w-0 flex-1 flex-col gap-0.5 text-left';
       navBtn.title = 'Jump to this cell';
-      navBtn.onclick = () => this.notebookApi?.focusCellById?.(sec.cellId);
+      navBtn.onclick = () => {
+        if (this.activeMainTab === 'visual' && this.revealVisualCell(sec.cellId)) return;
+        this.notebookApi?.focusCellById?.(sec.cellId);
+      };
       const meta = document.createElement('div');
       meta.className = 'flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500';
       const num = document.createElement('span');
@@ -1077,6 +1081,9 @@ class VerdictEditorElement extends HTMLElement {
     return this.notebookApi.notebookCells().map((c, index) => ({
       id: c.id,
       kind: c.kind,
+      role: c.role,
+      path: c.path,
+      moduleName: c.moduleName,
       source: c.source,
       index,
     }));
@@ -1086,50 +1093,55 @@ class VerdictEditorElement extends HTMLElement {
     if (!this.vizRoot) return;
     if (cells.length === 0) {
       this.vizRoot.innerHTML =
-        '<div class="p-4 text-slate-500 italic">Add a code cell to see its structure here.</div>';
+        '<div class="p-4 text-slate-500 italic">Add a module or runnable cell to see its structure here.</div>';
       return;
     }
 
+    const modules = notebookCellsToVizModules(cells);
     const cleanups: Array<() => void> = [];
     this.vizRoot.innerHTML = '';
     this.vizRoot.className = 'min-h-full flex flex-col gap-4 p-3';
 
-    for (const cell of cells) {
-      const section = document.createElement('section');
-      section.dataset.vizCell = cell.id;
+    for (const moduleSection of modules) {
+      const section = document.createElement('details');
+      section.open = !this.collapsedVizModules.has(moduleSection.id);
+      section.dataset.vizModule = moduleSection.id;
+      section.dataset.vizCell = moduleSection.primaryCellId;
+      section.dataset.vizCellIds = moduleSection.cells.map((cell) => cell.id).join(' ');
       section.className =
         'notebook-viz-cell rounded-lg border border-slate-800 bg-slate-950/40 overflow-hidden';
 
-      const header = document.createElement('button');
-      header.type = 'button';
+      const header = document.createElement('summary');
       header.className =
-        'flex w-full items-center justify-between gap-2 border-b border-slate-800/80 bg-slate-900/60 px-3 py-2 text-left hover:bg-slate-900';
-      header.innerHTML = `<span class="text-[10px] font-bold uppercase tracking-wider text-indigo-300/90">${cell.index + 1} · ${cell.kind === 'wysiwyg' ? 'Text' : 'Code'}</span><span class="truncate font-mono text-[11px] text-slate-400">${escapeHtml(cellVizPreview(cell))}</span>`;
-      header.onclick = () => this.notebookApi?.focusCellById?.(cell.id);
+        'flex w-full cursor-pointer list-none items-center justify-between gap-2 border-b border-slate-800/80 bg-slate-900/60 px-3 py-2 text-left hover:bg-slate-900';
+      const kindLabel =
+        moduleSection.kind === 'text' ? 'Text' : moduleSection.kind === 'module' ? 'Module' : 'Runnable Module';
+      const cellCount = moduleSection.cells.length > 1 ? ` · ${moduleSection.cells.length} cells` : '';
+      header.innerHTML = `<span class="shrink-0 font-mono text-[12px] text-slate-500" data-viz-module-marker="${escapeHtml(moduleSection.id)}">${section.open ? '▾' : '▸'}</span><span class="text-[10px] font-bold uppercase tracking-wider text-indigo-300/90">${kindLabel}${cellCount}</span><span class="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-300">${escapeHtml(moduleSection.label)}</span><span class="hidden truncate text-[11px] text-slate-500 md:inline">${escapeHtml(moduleSection.preview)}</span>`;
       section.appendChild(header);
 
       const body = document.createElement('div');
-      body.dataset.vizCellBody = cell.id;
+      body.dataset.vizCellBody = moduleSection.id;
       body.className = 'min-h-[48px]';
       section.appendChild(body);
+      this.vizRoot.appendChild(section);
 
-      if (cell.kind === 'wysiwyg') {
+      if (moduleSection.kind === 'text') {
         body.innerHTML =
           '<div class="p-3 text-xs italic text-slate-500">Text cells are not compiled — visualization applies to code cells only.</div>';
       } else {
-        const wrapped = wrapCellModule(cell.source);
-        section.dataset.vizLineOffset = String(wrapped.lineOffset);
-        const src = this.materializeInputs(wrapped.text);
+        const src = this.materializeInputs(moduleSection.source);
         await this.renderSingleSourceVisualization(body, src, {
-          cellId: cell.id,
-          lineOffset: wrapped.lineOffset,
-          onJump: (line) => this.jumpToSourceLine(line, cell.id, wrapped.lineOffset),
-          collapseKey: (def) => collapsedDefKey(cell.id, def),
+          cellId: moduleSection.primaryCellId,
+          onJump: (line) => {
+            const mapped = mappedCellForLine(moduleSection, line);
+            this.jumpToSourceLine(mapped.line, mapped.cellId);
+          },
+          collapseKey: (def) => collapsedDefKey(moduleSection.id, def),
+          lineToCell: (line) => mappedCellForLine(moduleSection, line),
           onCleanup: (fn) => cleanups.push(fn),
         });
       }
-
-      this.vizRoot.appendChild(section);
     }
 
     this.attachVizListeners();
@@ -1146,6 +1158,7 @@ class VerdictEditorElement extends HTMLElement {
       lineOffset?: number;
       onJump: (line: number) => void;
       collapseKey: (defName: string) => string;
+      lineToCell?: (line: number) => { cellId: string; line: number };
       onCleanup?: (fn: () => void) => void;
     },
   ) {
@@ -1180,6 +1193,16 @@ class VerdictEditorElement extends HTMLElement {
     }
 
     hyloLib!.renderCode(`#${rootId}`, ast);
+    if (opts.lineToCell) {
+      inner.querySelectorAll<HTMLElement>('[data-src-line]').forEach((el) => {
+        const line = Number(el.dataset.srcLine ?? 0);
+        if (!Number.isFinite(line) || line <= 0) return;
+        const mapped = opts.lineToCell?.(line);
+        if (!mapped) return;
+        el.dataset.vizJumpCell = mapped.cellId;
+        el.dataset.vizJumpLine = String(mapped.line);
+      });
+    }
     inner.querySelectorAll<HTMLDetailsElement>('details[data-def]').forEach((d) => {
       const def = d.dataset.def;
       if (def && this.collapsedDefs.has(opts.collapseKey(def))) d.removeAttribute('open');
@@ -1225,6 +1248,20 @@ class VerdictEditorElement extends HTMLElement {
     });
   }
 
+  private revealVisualCell(cellId: string): boolean {
+    if (!this.vizRoot) return false;
+    const sections = [...this.vizRoot.querySelectorAll<HTMLDetailsElement>('[data-viz-module]')];
+    const target = sections.find((section) =>
+      (section.dataset.vizCellIds ?? '').split(' ').filter(Boolean).includes(cellId),
+    );
+    if (!target) return false;
+    target.open = true;
+    if (target.dataset.vizModule) this.collapsedVizModules.delete(target.dataset.vizModule);
+    target.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    this.notebookApi?.focusCellById?.(cellId);
+    return true;
+  }
+
   // One-time delegated listeners on the viz container: click-a-block→source, and
   // collapse-state tracking.
   private attachVizListeners() {
@@ -1235,16 +1272,25 @@ class VerdictEditorElement extends HTMLElement {
       if (!el) return;
       const line = Number(el.dataset.srcLine);
       const section = el.closest<HTMLElement>('[data-viz-cell]');
-      const cellId = section?.dataset.vizCell;
+      const cellId = el.dataset.vizJumpCell || section?.dataset.vizCell;
+      const mappedLine = Number(el.dataset.vizJumpLine ?? line);
       const offset = Number(section?.dataset.vizLineOffset ?? 0);
-      if (Number.isFinite(line)) this.jumpToSourceLine(line, cellId, offset);
+      if (Number.isFinite(line)) this.jumpToSourceLine(Number.isFinite(mappedLine) ? mappedLine : line, cellId, offset);
     });
     // `toggle` doesn't bubble, so capture it on the way down.
     this.vizRoot.addEventListener(
       'toggle',
       (e) => {
         const d = e.target as HTMLDetailsElement;
-        if (!(d instanceof HTMLDetailsElement) || !d.dataset.def) return;
+        if (!(d instanceof HTMLDetailsElement)) return;
+        if (d.dataset.vizModule) {
+          if (d.open) this.collapsedVizModules.delete(d.dataset.vizModule);
+          else this.collapsedVizModules.add(d.dataset.vizModule);
+          const marker = d.querySelector<HTMLElement>('[data-viz-module-marker]');
+          if (marker) marker.textContent = d.open ? '▾' : '▸';
+          return;
+        }
+        if (!d.dataset.def) return;
         const cellId = d.closest<HTMLElement>('[data-viz-cell]')?.dataset.vizCell;
         const key = cellId ? collapsedDefKey(cellId, d.dataset.def) : d.dataset.def;
         if (d.open) this.collapsedDefs.delete(key);

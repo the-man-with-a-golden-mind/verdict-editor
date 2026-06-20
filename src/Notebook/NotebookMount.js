@@ -135,6 +135,10 @@ export function mountNotebookImpl(selector) {
           cachedDocs: new Map(),
           maximizedCellId: null,
           running: new Set(),
+          // Cells whose Run started an in-cell loop. The cell keeps re-running
+          // (driven by its own `time.sleep` cadence) until Stop clears it. Loops
+          // are PER CELL and independent.
+          cellLoops: new Set(),
           runControllers: {},
           executionCounts: {},
           executionSeq: 0,
@@ -648,9 +652,31 @@ export function mountNotebookImpl(selector) {
           return [...names];
         }
 
-        async function runCell(cell, cellIdx) {
+        // A cell drives its own loop when its source uses the Loop library
+        // (`loopEvery`/`sleep`). The cadence is the millisecond arg in the cell
+        // source — nothing hidden, nothing global.
+        function isLoopCell(cell) {
+          return isRunnableCell(cell) && /\b(loopEvery|sleep)\b/.test(cell.source ?? "");
+        }
+
+        // Single source of truth for the 3-color status dot, shared by the
+        // gutter and the Cells nav: orange while running/looping, red on the
+        // last error, green when the last run produced output, else gray.
+        function cellStatus(cell) {
+          if (state.running.has(cell.id) || state.cellLoops.has(cell.id)) return "running";
+          if (state.errors[cell.id]) return "error";
+          if (cellHasOutput(cell)) return "ok";
+          return "idle";
+        }
+
+        async function runCell(cell, cellIdx, opts = {}) {
           if (!isRunnableCell(cell)) return;
-          if (state.running.has(cell.id)) return;
+          // A loop re-runs the same cell, so allow the loop's own re-entry
+          // (looping flag) past the in-flight guard.
+          if (state.running.has(cell.id) && !opts.looping) return;
+          // Starting Run on a loop cell registers the loop before the first run
+          // so the status reflects "looping" immediately.
+          if (!opts.looping && isLoopCell(cell)) state.cellLoops.add(cell.id);
           syncSharedEditorSource();
           const controller = new AbortController();
           state.runControllers[cell.id] = controller;
@@ -659,6 +685,7 @@ export function mountNotebookImpl(selector) {
           updateNotebook({ tag: "setOutputFolded", id: cell.id, folded: false });
           refreshCellGutter(cell, cellIdx);
           schedulePublishPanel();
+          let iterationErrored = false;
           try {
             const cellNames = bindingNamesForRun(cell);
             if (cellNames.length === 0) {
@@ -668,28 +695,45 @@ export function mountNotebookImpl(selector) {
             const outs = await evalCellOutputs(cell, cellIdx, controller.signal);
             if (controller.signal.aborted) return;
             applyEvalResults(outs, cellIdx, cell.id);
+            if (state.errors[cell.id]) iterationErrored = true;
           } catch (e) {
-            if (!controller.signal.aborted) state.errors[cell.id] = String(e);
-          } finally {
             if (!controller.signal.aborted) {
+              state.errors[cell.id] = String(e);
+              iterationErrored = true;
+            }
+          } finally {
+            const aborted = controller.signal.aborted;
+            if (!aborted) {
               state.executionSeq += 1;
               state.executionCounts[cell.id] = state.executionSeq;
             }
             state.running.delete(cell.id);
             delete state.runControllers[cell.id];
+            // Keep the loop alive while it is still registered and healthy; an
+            // error or Stop ends it (Stop already cleared cellLoops). The next
+            // pass runs immediately — the cell's own `time.sleep` already
+            // provided the inter-iteration delay during this run.
+            const shouldLoop = !aborted && !iterationErrored && state.cellLoops.has(cell.id);
+            if (iterationErrored) state.cellLoops.delete(cell.id);
             refreshCellGutter(cell, cellIdx);
             await refreshCellOutput(cell, cellIdx);
             schedulePublishPanel();
+            if (shouldLoop) {
+              const nextIdx = state.cells.findIndex((c) => c.id === cell.id);
+              if (nextIdx >= 0) void runCell(state.cells[nextIdx], nextIdx, { looping: true });
+            }
           }
         }
 
         function stopCell(cell) {
+          state.cellLoops.delete(cell.id);
           const controller = state.runControllers[cell.id];
           if (controller) controller.abort();
           state.running.delete(cell.id);
           delete state.runControllers[cell.id];
           state.errors[cell.id] = "Stopped.";
-          render();
+          refreshCellGutterById(cell.id);
+          schedulePublishPanel();
         }
 
         async function runAll() {
@@ -953,6 +997,16 @@ export function mountNotebookImpl(selector) {
           const ui = ensureUi(cell);
           const isMax = state.maximizedCellId === cell.id;
           appendCellGutterControls(gutter, cell, idx, ui, cell.kind === "code", isMax);
+        }
+
+        // Refresh gutter + output for a cell by id (used by Stop, which has no
+        // index in scope), without re-rendering the whole stack.
+        function refreshCellGutterById(cellId) {
+          const idx = state.cells.findIndex((c) => c.id === cellId);
+          if (idx < 0) return;
+          const cell = state.cells[idx];
+          refreshCellGutter(cell, idx);
+          void refreshCellOutput(cell, idx);
         }
 
         async function fillOutputHost(hostEl, cell, idx) {
