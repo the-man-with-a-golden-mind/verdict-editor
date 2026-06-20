@@ -246,7 +246,13 @@ export function mountNotebookImpl(selector) {
           ) {
             state.cells = saved.cells.map(mapLoadedCell);
           } else {
-            state.cells = seeded.cells;
+            // Fresh start: module/library cells begin FOLDED (they are reference,
+            // not the thing you run), runnable cells stay open. User edits persist,
+            // so this only applies to the initial seed.
+            state.cells = seeded.cells.map((c) => ({
+              ...c,
+              ui: { ...c.ui, folded: isModuleCell(c) },
+            }));
             persist(state, bridge);
           }
           publishSource();
@@ -1221,13 +1227,16 @@ export function mountNotebookImpl(selector) {
           editorSection.className =
             "notebook-cell-editor-section relative flex flex-col min-h-0 overflow-hidden";
 
-          // Jupyter-style: the editor shows its FULL content so the wheel scrolls
-          // the page between cells instead of getting trapped in a per-cell
-          // scrollbar. A manual drag (editorResized) pins an explicit height.
+          // A cell starts at its content height but capped at ~1/3 of the viewport
+          // (so a long runnable cell doesn't take the whole screen); the user can
+          // drag it taller (editorResized pins an explicit height up to maxEditorH).
           const maxEditorH = isMax ? 2400 : 1600;
           const lineCount = Math.max((cell.source || "").split("\n").length, 1);
-          const autoH = Math.min(Math.max(lineCount * 18 + 18, 48), maxEditorH);
-          const contentH = ui.editorResized ? Math.min(Math.max(ui.editorHeight, 48), maxEditorH) : autoH;
+          const autoH = Math.max(lineCount * 18 + 18, 48);
+          const thirdViewport = Math.max(160, Math.round((window.innerHeight || 900) / 3));
+          const contentH = ui.editorResized
+            ? Math.min(Math.max(ui.editorHeight, 48), maxEditorH)
+            : Math.min(autoH, thirdViewport);
           const editorHost = document.createElement("div");
           editorHost.className = "notebook-cell-editor font-mono text-xs verdict-cm-host";
           editorHost.dataset.cellEditorHost = cell.id;
