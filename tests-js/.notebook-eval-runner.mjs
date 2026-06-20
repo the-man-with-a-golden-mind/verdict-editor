@@ -540,7 +540,25 @@ function wrapBindingAsMain(src, bindingName) {
   const escaped = bindingName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return src.replace(/\bmain\b/g, "__nbUserMain__").replace(new RegExp(`\\b${escaped}\\b`, "g"), "main");
 }
+var compileCache = /* @__PURE__ */ new Map();
+var COMPILE_CACHE_MAX = 48;
 function compileNotebookProgram(vlib, src, bindingName) {
+  const key = `${bindingName ?? ""}\0${src}`;
+  const hit = compileCache.get(key);
+  if (hit) {
+    compileCache.delete(key);
+    compileCache.set(key, hit);
+    return hit;
+  }
+  const result = compileNotebookProgramUncached(vlib, src, bindingName);
+  compileCache.set(key, result);
+  if (compileCache.size > COMPILE_CACHE_MAX) {
+    const oldest = compileCache.keys().next().value;
+    if (oldest !== void 0) compileCache.delete(oldest);
+  }
+  return result;
+}
+function compileNotebookProgramUncached(vlib, src, bindingName) {
   if (bindingName && typeof vlib.compileBindingEntryJS === "function") {
     if (bindingName !== "main") {
       const wrapped = wrapBindingAsMain(src, bindingName);

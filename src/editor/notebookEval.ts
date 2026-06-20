@@ -203,7 +203,41 @@ function wrapBindingAsMain(src: string, bindingName: string): string {
     .replace(new RegExp(`\\b${escaped}\\b`, 'g'), 'main');
 }
 
+// Compiled programs are pure functions of (source, bindingName). The notebook
+// re-evaluates the same cell repeatedly (manual re-runs, loops) with unchanged
+// source, so cache the compiled output and skip recompilation until the source
+// actually changes. Keyed by the fully materialized source (inputs included),
+// so any edit or input change is a cache miss. Bounded LRU to cap memory.
+const compileCache = new Map<
+  string,
+  { ok: true; output: string; entry: string } | { ok: false; error: string }
+>();
+const COMPILE_CACHE_MAX = 48;
+
 function compileNotebookProgram(
+  vlib: VerdictLib,
+  src: string,
+  bindingName?: string,
+): { ok: true; output: string; entry: string } | { ok: false; error: string } {
+  const key = `${bindingName ?? ''} ${src}`;
+  const hit = compileCache.get(key);
+  if (hit) {
+    compileCache.delete(key);
+    compileCache.set(key, hit); // LRU bump
+    return hit;
+  }
+  const result = compileNotebookProgramUncached(vlib, src, bindingName);
+  // Cache successes always; cache failures too (a broken cell stays broken until
+  // edited, and recompiling it every tick to re-derive the same error is wasteful).
+  compileCache.set(key, result);
+  if (compileCache.size > COMPILE_CACHE_MAX) {
+    const oldest = compileCache.keys().next().value;
+    if (oldest !== undefined) compileCache.delete(oldest);
+  }
+  return result;
+}
+
+function compileNotebookProgramUncached(
   vlib: VerdictLib,
   src: string,
   bindingName?: string,
