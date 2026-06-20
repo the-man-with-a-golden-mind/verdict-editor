@@ -26,6 +26,21 @@ export {
 
 export { decodeDisplay, renderDisplayInto } from "./Display.js";
 
+// Pure cell-project logic (PureScript Notebook.Project via its JS adapter). Re-
+// exported so tooling/tests can reach it through the committed bundle rather
+// than the source tree's build-only output layout.
+export {
+  buildNotebookProgramSource,
+  buildRunnableCellSource,
+  cellModuleName,
+  importModuleNames,
+  inferCellRole,
+  isModuleCell,
+  isRunnableCell,
+  normalizeCellMeta,
+  projectCellLabel,
+} from "./output/Main/NotebookProject.js";
+
 import { registerPsMountTable } from "./Spreadsheet.js";
 import {
   mountSpreadsheetViewExport,
