@@ -73,6 +73,7 @@ function persist(state, bridge) {
       role: c.role,
       path: c.path,
       moduleName: c.moduleName,
+      name: c.name ?? "",
       source: c.source,
       ui: c.ui,
     })),
@@ -156,6 +157,7 @@ export function mountNotebookImpl(selector) {
             role: meta.role,
             path: meta.path,
             moduleName: meta.moduleName,
+            name: c.name ?? "",
             source: meta.source,
             ui: { ...defaultCellUi(), ...c.ui },
           };
@@ -177,6 +179,7 @@ export function mountNotebookImpl(selector) {
               role: c.role,
               path: c.path,
               moduleName: c.moduleName,
+              name: c.name ?? "",
               source: c.source ?? "",
               ui: { ...defaultCellUi(), ...c.ui },
             })),
@@ -1001,9 +1004,10 @@ export function mountNotebookImpl(selector) {
           await Promise.resolve(bridge.syncCellsNav?.(sections));
         }
 
-        // Nav/preview line is computed in PureScript (Notebook.cellPreviewLine)
-        // so navigation has a single source of truth.
-        const getCellPreviewLine = (cell) => cellPreviewLine(cell);
+        // Nav/preview line: a user-given cell name wins; otherwise the first code
+        // line (PureScript Notebook.cellPreviewLine, single source of truth).
+        const getCellPreviewLine = (cell) =>
+          cell.name && cell.name.trim() ? cell.name.trim() : cellPreviewLine(cell);
 
         function cellHasOutput(cell) {
           return outputKeysForCell(cell).some((n) => state.outputs[`${cell.id}:${n}`]) || Boolean(state.errors[cell.id]);
@@ -1017,6 +1021,14 @@ export function mountNotebookImpl(selector) {
             items.push({ label, onClick, danger: !!opts.danger, sepBefore: !!opts.sepBefore });
 
           if (isRunnableCell(cell) && idx > 0) add("Run above", () => void runAbove(idx));
+          add(cell.name ? "Rename cell" : "Name cell", () => {
+            const next = prompt("Cell name (shown in the Cells panel):", cell.name ?? "");
+            if (next === null) return;
+            updateNotebook({ tag: "setName", id: cell.id, name: next.trim() });
+            persist(state, bridge);
+            schedulePublishPanel();
+            void patchCellDom(cell.id);
+          });
           if (isCodeCell) add("Save file", () => downloadCellFile(cell));
           add("Insert code below", () => addCellBelow(idx, "code"), { sepBefore: true });
           add("Insert text below", () => addCellBelow(idx, "wysiwyg"));
@@ -1226,7 +1238,16 @@ export function mountNotebookImpl(selector) {
             const outHost = document.createElement("div");
             outHost.className = "notebook-output border-t border-slate-800 px-3 py-2 overflow-auto";
             outHost.dataset.cellOutput = cell.id;
-            outHost.style.maxHeight = isMax ? "none" : `${Math.max(ui.outputHeight, 96)}px`;
+            // Un-resized: cap with max-height so short output stays small. Once the
+            // user drags, pin an explicit height so growing AND shrinking both work
+            // (max-height alone can't grow past the content).
+            if (isMax) {
+              outHost.style.maxHeight = "none";
+            } else if (ui.outputResized) {
+              outHost.style.height = `${Math.max(ui.outputHeight, 96)}px`;
+            } else {
+              outHost.style.maxHeight = `${Math.max(ui.outputHeight, 96)}px`;
+            }
             await fillOutputHost(outHost, cell, idx);
             body.appendChild(outHost);
             if (!isMax) {
@@ -1237,7 +1258,8 @@ export function mountNotebookImpl(selector) {
                 outputResizer,
                 () => Math.max(ui.outputHeight, 96),
                 (height) => {
-                  outHost.style.maxHeight = `${Math.round(height)}px`;
+                  outHost.style.maxHeight = "none";
+                  outHost.style.height = `${Math.round(height)}px`;
                 },
                 {
                   min: 96,

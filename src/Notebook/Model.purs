@@ -31,6 +31,7 @@ data Msg
   | SetOutputFolded String Boolean
   | SetOutputHeight String Int
   | SetEditorHeight String Int
+  | SetName String String
   | Maximize String
   | ClearMaximize
   | InsertBelow String Cell
@@ -47,6 +48,7 @@ type JsCell =
   , role :: String
   , path :: String
   , moduleName :: String
+  , name :: String
   , source :: String
   , ui :: CellUi
   }
@@ -63,6 +65,7 @@ type JsMsg =
   , kind :: String
   , delta :: Int
   , source :: String
+  , name :: String
   , folded :: Boolean
   , height :: Int
   , cell :: JsCell
@@ -98,7 +101,10 @@ update msg model = case msg of
     updateCellUi id (\ui -> ui { outputFolded = folded }) model
 
   SetOutputHeight id height ->
-    updateCellUi id (\ui -> ui { outputHeight = max 96 height }) model
+    updateCellUi id (\ui -> ui { outputHeight = max 96 height, outputResized = true }) model
+
+  SetName id name ->
+    updateCell id (\cell -> cell { name = name }) model
 
   SetEditorHeight id height ->
     updateCellUi id (\ui -> ui { editorHeight = max 48 height, editorResized = true }) model
@@ -209,6 +215,7 @@ emptyCodeCell =
   , role: "runnable"
   , path: ""
   , moduleName: "Main"
+  , name: ""
   , source: ""
   , ui: defaultCellUi
   }
@@ -224,6 +231,7 @@ jsToMsg msg = case msg.tag of
   "setOutputFolded" -> SetOutputFolded msg.id msg.folded
   "setOutputHeight" -> SetOutputHeight msg.id msg.height
   "setEditorHeight" -> SetEditorHeight msg.id msg.height
+  "setName" -> SetName msg.id msg.name
   "maximize" -> Maximize msg.id
   "clearMaximize" -> ClearMaximize
   "insertBelow" -> InsertBelow msg.id (jsToCell msg.cell)
@@ -256,6 +264,7 @@ jsToCell cell =
   , role: cell.role
   , path: cell.path
   , moduleName: cell.moduleName
+  , name: cell.name
   , source: cell.source
   , ui: cell.ui
   }
@@ -267,6 +276,7 @@ cellToJs cell =
   , role: cell.role
   , path: cell.path
   , moduleName: cell.moduleName
+  , name: cell.name
   , source: cell.source
   , ui: cell.ui
   }

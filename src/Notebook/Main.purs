@@ -95,6 +95,7 @@ foreignToCell f =
   , role: unsafeReadString f "role"
   , path: unsafeReadString f "path"
   , moduleName: unsafeReadString f "moduleName"
+  , name: unsafeReadString f "name"
   , source: unsafeReadString f "source"
   , ui: unsafeReadCellUi f
   }

@@ -18,6 +18,7 @@ type CellUi =
   , editorHeight :: Int
   , editorResized :: Boolean
   , outputHeight :: Int
+  , outputResized :: Boolean
   }
 
 type Cell =
@@ -26,6 +27,7 @@ type Cell =
   , role :: String
   , path :: String
   , moduleName :: String
+  , name :: String
   , source :: String
   , ui :: CellUi
   }
@@ -38,4 +40,5 @@ defaultCellUi =
   , editorHeight: 160
   , editorResized: false
   , outputHeight: 180
+  , outputResized: false
   }

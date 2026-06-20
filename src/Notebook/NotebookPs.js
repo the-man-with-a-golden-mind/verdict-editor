@@ -83,6 +83,7 @@ export function normalizeCellUi(ui) {
     editorHeight: Number.isFinite(ui?.editorHeight) ? Math.round(ui.editorHeight) : 160,
     editorResized: Boolean(ui?.editorResized),
     outputHeight: Number.isFinite(ui?.outputHeight) ? Math.round(ui.outputHeight) : 180,
+    outputResized: Boolean(ui?.outputResized),
   };
 }
 
