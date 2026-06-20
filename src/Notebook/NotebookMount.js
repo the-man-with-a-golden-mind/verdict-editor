@@ -756,8 +756,19 @@ export function mountNotebookImpl(selector) {
         }
 
         // --- Cell management (operate on whole cell objects so `ui` is preserved) ---
-        function addCellBelow(idx, kind) {
-          const cell = { id: newId(), ...normalizeCellMeta({ kind: kind === "wysiwyg" ? "wysiwyg" : "code", source: "" }), ui: defaultCellUi() };
+        // A cell's role is derived from its source header: `module Main exposing
+        // (main)` is runnable; `module <Name> exposing (..)` (Name != Main) is a
+        // shared module. These starter templates make that choice explicit when
+        // inserting a cell — the header is fully visible/editable, nothing hidden.
+        const RUNNABLE_TEMPLATE = "module Main exposing (main)\n\nmain =\n  \"edit me\"\n";
+        const MODULE_TEMPLATE =
+          "module NewModule exposing (..)\n\n" +
+          "-- Shared helpers. Rename NewModule, then import from a runnable cell:\n" +
+          "--   import NewModule exposing (..)\n" +
+          "greeting : String\ngreeting = \"hello from NewModule\"\n";
+
+        function addCellBelow(idx, kind, source = "") {
+          const cell = { id: newId(), ...normalizeCellMeta({ kind: kind === "wysiwyg" ? "wysiwyg" : "code", source }), ui: defaultCellUi() };
           const anchor = state.cells[idx];
           updateNotebook({ tag: "insertBelow", id: anchor?.id ?? "", cell });
           publishSource();
@@ -1092,7 +1103,8 @@ export function mountNotebookImpl(selector) {
             void patchCellDom(cell.id);
           });
           if (isCodeCell) add("Save file", () => downloadCellFile(cell));
-          add("Insert code below", () => addCellBelow(idx, "code"), { sepBefore: true });
+          add("Insert runnable below", () => addCellBelow(idx, "code", RUNNABLE_TEMPLATE), { sepBefore: true });
+          add("Insert module below", () => addCellBelow(idx, "code", MODULE_TEMPLATE));
           add("Insert text below", () => addCellBelow(idx, "wysiwyg"));
           if (idx > 0) add("Move up", () => moveCellBy(idx, -1));
           if (idx < state.cells.length - 1) add("Move down", () => moveCellBy(idx, 1));
@@ -1443,8 +1455,8 @@ export function mountNotebookImpl(selector) {
           await renderFull();
         }
 
-        const onAddCode = () => {
-          const cell = { id: newId(), kind: "code", source: "", ui: defaultCellUi() };
+        function appendCodeCell(source) {
+          const cell = { id: newId(), ...normalizeCellMeta({ kind: "code", source }), ui: defaultCellUi() };
           updateNotebook({ tag: "appendCell", cell });
           publishSource();
           if (canIncrementalDom()) {
@@ -1455,7 +1467,10 @@ export function mountNotebookImpl(selector) {
           } else {
             render();
           }
-        };
+        }
+
+        const onAddCode = () => appendCodeCell(RUNNABLE_TEMPLATE);
+        const onAddModule = () => appendCodeCell(MODULE_TEMPLATE);
 
         const onAddText = () => {
           updateNotebook({
@@ -1516,6 +1531,7 @@ export function mountNotebookImpl(selector) {
           mountToolbar(toolbarButtonHost, {
             onSave,
             onAddCode,
+            onAddModule,
             onAddText,
             onCut,
             onCopy,
