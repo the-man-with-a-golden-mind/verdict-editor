@@ -1292,7 +1292,14 @@ export function mountNotebookImpl(selector) {
           // the user can drag it taller (editorResized pins an explicit height up
           // to maxEditorHeightPx).
           const maxEditorH = plan.maxEditorHeightPx;
-          const contentH = plan.editorHeightPx;
+          // Unfocused code cells render a static preview — keep them compact (a
+          // scannable minimap) so a long cell doesn't fill the screen with a slab
+          // of clipped code. The focused (active) cell keeps the roomy ~1/3
+          // viewport editor; a manually resized cell keeps its pinned height.
+          let contentH = plan.editorHeightPx;
+          if (cell.kind === "code" && !focused && !isMax && !ui.editorResized) {
+            contentH = Math.min(contentH, 240);
+          }
           const editorHost = document.createElement("div");
           editorHost.className = "notebook-cell-editor font-mono text-xs verdict-cm-host";
           editorHost.dataset.cellEditorHost = cell.id;
