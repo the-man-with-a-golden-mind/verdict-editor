@@ -17,6 +17,10 @@ module Main
   , mountSpreadsheetViewExport
   , mountToolbarExport
   , mountGutterExport
+  , mountCellHeadExport
+  , mountDiagnosticsExport
+  , mountCodeFoldedBarExport
+  , mountFoldedPreviewExport
   , main
   ) where
 
@@ -32,6 +36,7 @@ import Notebook
   , bindingNamesFromSource
   , cellPreviewLine
   )
+import Notebook.CellChrome as CC
 import Notebook.Gutter as GT
 import Notebook.Model as NM
 import Notebook.Toolbar as TB
@@ -122,6 +127,18 @@ mountToolbarExport = TB.mountToolbarExport
 
 mountGutterExport :: EffectFn2 Foreign GT.GutterProps Unit
 mountGutterExport = GT.mountGutterExport
+
+mountCellHeadExport :: EffectFn2 Foreign CC.HeadProps Unit
+mountCellHeadExport = CC.mountCellHeadExport
+
+mountDiagnosticsExport :: EffectFn2 Foreign (Array CC.Diag) Unit
+mountDiagnosticsExport = CC.mountDiagnosticsExport
+
+mountCodeFoldedBarExport :: EffectFn2 Foreign (Effect Unit) Unit
+mountCodeFoldedBarExport = CC.mountCodeFoldedBarExport
+
+mountFoldedPreviewExport :: EffectFn2 Foreign CC.FoldedProps Unit
+mountFoldedPreviewExport = CC.mountFoldedPreviewExport
 
 renderDisplayIntoExport :: EffectFn3 Foreign Foreign Foreign Unit
 renderDisplayIntoExport = D.renderDisplayIntoExport

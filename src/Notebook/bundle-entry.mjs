@@ -17,6 +17,10 @@ export {
   mountSpreadsheetViewExport,
   mountToolbarExport,
   mountGutterExport,
+  mountCellHeadExport,
+  mountDiagnosticsExport,
+  mountCodeFoldedBarExport,
+  mountFoldedPreviewExport,
 } from "./output/Main/index.js";
 
 export { decodeDisplay, renderDisplayInto } from "./Display.js";
@@ -26,6 +30,10 @@ import {
   mountSpreadsheetViewExport,
   mountToolbarExport as psMountToolbar,
   mountGutterExport as psMountGutter,
+  mountCellHeadExport as psMountCellHead,
+  mountDiagnosticsExport as psMountDiagnostics,
+  mountCodeFoldedBarExport as psMountCodeFoldedBar,
+  mountFoldedPreviewExport as psMountFoldedPreview,
 } from "./output/Main/index.js";
 import * as PsSpaBrowser from "./output/PsSpa.Browser/foreign.js";
 
@@ -46,3 +54,10 @@ globalThis.__notebookMountToolbar = (host, props) => psMountToolbar(host, props)
 // Mount the PureScript ps-spa cell gutter into `host` (the gutter container).
 // Props carry fold/run state from the Model + JS action thunks (Effect Unit).
 globalThis.__notebookMountGutter = (host, props) => psMountGutter(host, props);
+
+// Cell-chrome ps-spa pieces (Model-derived, presentational). Editor + output
+// hosts stay JS-managed (live CodeMirror / Plotly instances).
+globalThis.__notebookMountCellHead = (host, props) => psMountCellHead(host, props);
+globalThis.__notebookMountDiagnostics = (host, diags) => psMountDiagnostics(host, diags);
+globalThis.__notebookMountCodeFoldedBar = (host, onShow) => psMountCodeFoldedBar(host, onShow);
+globalThis.__notebookMountFoldedPreview = (host, props) => psMountFoldedPreview(host, props);

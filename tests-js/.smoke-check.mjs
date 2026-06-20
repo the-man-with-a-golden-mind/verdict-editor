@@ -90,6 +90,18 @@ async function run(url, browser) {
   }, gutter.id);
   await delay(200);
 
+  // Cell chrome (head label + editor host) renders alongside the JS-managed
+  // editor/output mount points.
+  const chrome = await page.evaluate((id) => {
+    const cell = document.querySelector(`[data-cell-id="${id}"]`);
+    return {
+      kindLabel: !!cell.querySelector('span.uppercase'),
+      editorHost: !!cell.querySelector('[data-cell-editor-host]'),
+    };
+  }, gutter.id);
+  ok(chrome.kindLabel, "cell head renders a kind label");
+  ok(chrome.editorHost, "editor mount point present");
+
   // Run all → charts render.
   await page.evaluate(() => {
     const btn = [...document.querySelectorAll(".notebook-toolbar-host button")].find((b) => b.textContent?.trim() === "Run all");

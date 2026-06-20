@@ -1054,19 +1054,15 @@ export function mountNotebookImpl(selector) {
           body.className = "notebook-cell-body flex min-w-0 flex-1 flex-col min-h-0";
 
           const previewRow = document.createElement("div");
-          previewRow.className = "notebook-cell-folded-head flex min-h-[2rem] min-w-0 items-center px-2 py-1";
-          const preview = document.createElement("div");
-          preview.className =
-            "min-w-0 flex-1 truncate font-mono text-xs text-slate-400 cursor-pointer hover:text-slate-200";
-          preview.title = "Click to expand cell";
-          preview.textContent = getCellPreviewLine(cell);
-          preview.onclick = () => {
-            updateNotebook({ tag: "setFolded", id: cell.id, folded: false });
-            if (cell.kind === "code") updateNotebook({ tag: "focus", id: cell.id });
-            render();
-          };
-          previewRow.appendChild(preview);
           body.appendChild(previewRow);
+          globalThis.__notebookMountFoldedPreview?.(previewRow, {
+            preview: getCellPreviewLine(cell),
+            onExpand: () => {
+              updateNotebook({ tag: "setFolded", id: cell.id, folded: false });
+              if (cell.kind === "code") updateNotebook({ tag: "focus", id: cell.id });
+              render();
+            },
+          });
 
           // A folded cell collapses to just its preview line — no output shown.
 
@@ -1108,32 +1104,23 @@ export function mountNotebookImpl(selector) {
           const body = document.createElement("div");
           body.className = "notebook-cell-body flex min-w-0 flex-1 flex-col min-h-0";
 
+          // Cell header (title + kind label) rendered by the PureScript chrome
+          // component, derived from the Model.
           const cellHead = document.createElement("div");
-          cellHead.className =
-            "flex min-h-[2rem] items-center justify-between border-b border-slate-800/70 px-3 py-1";
-          const cellTitle = document.createElement("button");
-          cellTitle.type = "button";
-          cellTitle.className = "min-w-0 truncate text-left font-mono text-[11px] text-slate-400 hover:text-slate-200";
-          cellTitle.textContent = getCellPreviewLine(cell);
-          cellTitle.onclick = () => focusCell(cell.id);
-          const cellKind = document.createElement("span");
-          cellKind.className =
-            "ml-3 shrink-0 rounded border border-slate-700 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-500";
-          cellKind.textContent = projectCellLabel(cell);
-          cellHead.appendChild(cellTitle);
-          cellHead.appendChild(cellKind);
           body.appendChild(cellHead);
+          globalThis.__notebookMountCellHead?.(cellHead, {
+            preview: getCellPreviewLine(cell),
+            label: projectCellLabel(cell),
+            onFocus: () => focusCell(cell.id),
+          });
 
           if (ui.codeFolded && cell.kind === "code") {
             const bar = document.createElement("div");
-            bar.className =
-              "flex cursor-pointer items-center gap-2 px-3 py-1.5 text-[11px] italic text-slate-500 hover:text-slate-300";
-            bar.textContent = "⟨ code hidden — click to show ⟩";
-            bar.onclick = () => {
+            body.appendChild(bar);
+            globalThis.__notebookMountCodeFoldedBar?.(bar, () => {
               updateNotebook({ tag: "setCodeFolded", id: cell.id, folded: false });
               render();
-            };
-            body.appendChild(bar);
+            });
           } else {
           const editorSection = document.createElement("div");
           editorSection.className =
@@ -1190,18 +1177,17 @@ export function mountNotebookImpl(selector) {
           }
           }
 
-          const diagHost = document.createElement("div");
-          diagHost.className = "px-3 py-1";
-          diagHost.dataset.cellDiagHost = "1";
           const diags = state.cellDiags[cell.id] ?? [];
-          for (const d of diags) {
-            const el = document.createElement("div");
-            el.className = "text-xs text-rose-400 font-mono";
-            el.dataset.cellDiag = "1";
-            el.textContent = `Line ${d.line}: ${d.message}`;
-            diagHost.appendChild(el);
+          if (diags.length) {
+            const diagHost = document.createElement("div");
+            diagHost.className = "px-3 py-1";
+            diagHost.dataset.cellDiagHost = "1";
+            body.appendChild(diagHost);
+            globalThis.__notebookMountDiagnostics?.(
+              diagHost,
+              diags.map((d) => ({ line: d.line, message: d.message })),
+            );
           }
-          if (diags.length) body.appendChild(diagHost);
 
           if (!ui.outputFolded) {
             const outHost = document.createElement("div");
