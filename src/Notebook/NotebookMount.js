@@ -19,6 +19,7 @@ import {
   cellPreviewLine,
   updateModel,
   routeEvalResults,
+  cellViewPlan,
 } from "./NotebookPs.js";
 import {
   buildNotebookProgramSource,
@@ -1177,19 +1178,34 @@ export function mountNotebookImpl(selector) {
           const isMax = maximized || state.maximizedCellId === cell.id;
           const editorH = isMax ? Math.max(ui.editorHeight, 320) : ui.editorHeight;
           const isCodeCell = cell.kind === "code";
+          const focused = state.focusedId === cell.id;
+
+          // Pure render decisions (fold visibility, wrap class, editor/output
+          // sizing) live in PureScript (Notebook.CellView). JS reads the live-only
+          // values (line count, window.innerHeight) and applies the returned plan.
+          const lineCount = Math.max((cell.source || "").split("\n").length, 1);
+          const plan = cellViewPlan({
+            kind: cell.kind,
+            focused,
+            isMax,
+            folded: Boolean(ui.folded),
+            codeFolded: Boolean(ui.codeFolded),
+            outputFolded: Boolean(ui.outputFolded),
+            editorResized: Boolean(ui.editorResized),
+            editorHeight: Math.round(ui.editorHeight),
+            outputResized: Boolean(ui.outputResized),
+            outputHeight: Math.round(ui.outputHeight),
+            lineCount,
+            viewportHeight: window.innerHeight || 900,
+          });
 
           const wrap = document.createElement("div");
-          // shrink-0 so cells keep their height and the stack scrolls (Jupyter-style)
-          // instead of compressing every cell to fit the viewport.
-          const focused = state.focusedId === cell.id;
-          wrap.className =
-            "notebook-cell shrink-0 rounded-md border bg-slate-950/60 overflow-hidden " +
-            (focused ? "border-indigo-400/70" : "border-slate-800");
+          wrap.className = plan.wrapClass;
           wrap.dataset.cellId = cell.id;
           wrap.dataset.cellFocused = focused ? "1" : "0";
           if (isMax) wrap.classList.add("notebook-cell--maximized");
 
-          if (ui.folded && !isMax) {
+          if (plan.showFolded) {
             await renderFoldedCell(wrap, cell, idx, ui, isCodeCell, isMax);
             return wrap;
           }
@@ -1215,7 +1231,7 @@ export function mountNotebookImpl(selector) {
             onFocus: () => focusCell(cell.id),
           });
 
-          if (ui.codeFolded && cell.kind === "code") {
+          if (plan.showCodeFoldedBar) {
             const bar = document.createElement("div");
             body.appendChild(bar);
             globalThis.__notebookMountCodeFoldedBar?.(bar, () => {
@@ -1227,16 +1243,12 @@ export function mountNotebookImpl(selector) {
           editorSection.className =
             "notebook-cell-editor-section relative flex flex-col min-h-0 overflow-hidden";
 
-          // A cell starts at its content height but capped at ~1/3 of the viewport
-          // (so a long runnable cell doesn't take the whole screen); the user can
-          // drag it taller (editorResized pins an explicit height up to maxEditorH).
-          const maxEditorH = isMax ? 2400 : 1600;
-          const lineCount = Math.max((cell.source || "").split("\n").length, 1);
-          const autoH = Math.max(lineCount * 18 + 18, 48);
-          const thirdViewport = Math.max(160, Math.round((window.innerHeight || 900) / 3));
-          const contentH = ui.editorResized
-            ? Math.min(Math.max(ui.editorHeight, 48), maxEditorH)
-            : Math.min(autoH, thirdViewport);
+          // Editor height + max are decided in PureScript (Notebook.CellView): a
+          // cell starts at its content height capped at ~1/3 of the viewport, and
+          // the user can drag it taller (editorResized pins an explicit height up
+          // to maxEditorHeightPx).
+          const maxEditorH = plan.maxEditorHeightPx;
+          const contentH = plan.editorHeightPx;
           const editorHost = document.createElement("div");
           editorHost.className = "notebook-cell-editor font-mono text-xs verdict-cm-host";
           editorHost.dataset.cellEditorHost = cell.id;
@@ -1297,19 +1309,20 @@ export function mountNotebookImpl(selector) {
             );
           }
 
-          if (!ui.outputFolded) {
+          if (plan.showOutput) {
             const outHost = document.createElement("div");
             outHost.className = "notebook-output border-t border-slate-800 px-3 py-2 overflow-auto";
             outHost.dataset.cellOutput = cell.id;
-            // Un-resized: cap with max-height so short output stays small. Once the
-            // user drags, pin an explicit height so growing AND shrinking both work
-            // (max-height alone can't grow past the content).
-            if (isMax) {
+            // Output sizing mode is decided in PureScript (Notebook.CellView):
+            //   "none"   -> maximized; no max-height cap
+            //   "pinned" -> user dragged; explicit height (grow AND shrink)
+            //   "capped" -> un-resized; max-height so short output stays small
+            if (plan.outputMode === "none") {
               outHost.style.maxHeight = "none";
-            } else if (ui.outputResized) {
-              outHost.style.height = `${Math.max(ui.outputHeight, 96)}px`;
+            } else if (plan.outputMode === "pinned") {
+              outHost.style.height = `${plan.outputHeightPx}px`;
             } else {
-              outHost.style.maxHeight = `${Math.max(ui.outputHeight, 96)}px`;
+              outHost.style.maxHeight = `${plan.outputHeightPx}px`;
             }
             await fillOutputHost(outHost, cell, idx);
             body.appendChild(outHost);

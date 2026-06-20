@@ -22,6 +22,7 @@ module Main
   , mountCodeFoldedBarExport
   , mountFoldedPreviewExport
   , routeEvalResultsExport
+  , cellViewPlanExport
   , main
   ) where
 
@@ -38,6 +39,7 @@ import Notebook
   , cellPreviewLine
   )
 import Notebook.CellChrome as CC
+import Notebook.CellView as CV
 import Notebook.Gutter as GT
 import Notebook.Model as NM
 import Notebook.Run as RN
@@ -146,6 +148,9 @@ mountFoldedPreviewExport = CC.mountFoldedPreviewExport
 routeEvalResultsExport
   :: EffectFn4 (Array RN.RunCellInfo) (Array RN.EvalOut) Int String RN.RouteResult
 routeEvalResultsExport = RN.routeEvalResultsExport
+
+cellViewPlanExport :: EffectFn1 CV.CellViewInput CV.CellViewPlan
+cellViewPlanExport = mkEffectFn1 \input -> pure (CV.cellViewPlan input)
 
 renderDisplayIntoExport :: EffectFn3 Foreign Foreign Foreign Unit
 renderDisplayIntoExport = D.renderDisplayIntoExport

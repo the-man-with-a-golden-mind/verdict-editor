@@ -22,9 +22,14 @@ export {
   mountCodeFoldedBarExport,
   mountFoldedPreviewExport,
   routeEvalResultsExport,
+  cellViewPlanExport,
 } from "./output/Main/index.js";
 
 export { decodeDisplay, renderDisplayInto } from "./Display.js";
+
+// Pure cell-VIEW decision logic (PureScript Notebook.CellView via NotebookPs.js).
+// Re-exported through the bundle so tests/tooling can reach the thin JS wrapper.
+export { cellViewPlan } from "./output/Main/NotebookPs.js";
 
 // Pure cell-project logic (PureScript Notebook.Project via its JS adapter). Re-
 // exported so tooling/tests can reach it through the committed bundle rather
