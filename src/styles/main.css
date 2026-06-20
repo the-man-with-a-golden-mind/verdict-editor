@@ -90,6 +90,22 @@ body {
   overflow: hidden;
 }
 
+/* Compact unfocused preview that is clipped: fade the bottom edge to signal
+   there is more code below (click the cell to expand to the full editor). */
+.notebook-cell-editor--clipped {
+  position: relative;
+}
+.notebook-cell-editor--clipped::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 26px;
+  background: linear-gradient(to bottom, transparent, rgb(2 6 23 / 0.92));
+  pointer-events: none;
+}
+
 .notebook-cell-editor--preview .notebook-cell-source-preview {
   max-height: inherit;
   white-space: pre;

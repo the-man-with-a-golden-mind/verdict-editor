@@ -1317,6 +1317,11 @@ export function mountNotebookImpl(selector) {
               editorHost.dataset.cellEditorActive = "1";
             } else {
               renderCodeCellPreview(editorHost, cell);
+              // Fade the bottom when the preview is clipped, so a compact cell
+              // reads as "more below" rather than a hard cut. ~16px per line.
+              if (lineCount * 16 > contentH + 8) {
+                editorHost.classList.add("notebook-cell-editor--clipped");
+              }
             }
           }
 
