@@ -40,6 +40,43 @@ function makeCtx(vlib, finvm, createEffectStorage) {
   };
 }
 
+test("FinVM: loopEvery sleeps via real time.sleep effect and returns step result", async () => {
+  const { evalNotebookCells, createEffectStorage, vlib, finvm } = await loadLibs();
+  const { ctx } = makeCtx(vlib, finvm, createEffectStorage);
+  const src = `module Main exposing (main)
+
+main : Int
+main = loopEvery(20, step)
+
+step : Unit -> Int
+step _ = 7
+`;
+  const t0 = Date.now();
+  const out = await evalNotebookCells(ctx, src, ["main"]);
+  assert.equal(out[0]?.ok, true, out[0]?.error);
+  assert.match(String(out[0]?.display?.text), /7/);
+  assert.ok(Date.now() - t0 >= 15, "the real time.sleep effect should delay the run");
+});
+
+test("FinVM: aborting a sleeping cell rejects the pending sleep promptly", async () => {
+  const { evalNotebookCells, createEffectStorage, vlib, finvm } = await loadLibs();
+  const { ctx } = makeCtx(vlib, finvm, createEffectStorage);
+  const src = `module Main exposing (main)
+
+main : Int
+main = loopEvery(5000, step)
+
+step : Unit -> Int
+step _ = 7
+`;
+  const ac = new AbortController();
+  const t0 = Date.now();
+  setTimeout(() => ac.abort(), 10);
+  const out = await evalNotebookCells(ctx, src, ["main"], { signal: ac.signal });
+  assert.equal(out[0]?.ok, false);
+  assert.ok(Date.now() - t0 < 4000, "abort must not wait out the full 5s sleep");
+});
+
 test("FinVM: scalar binding renders text display", async () => {
   const { evalNotebookCells, createEffectStorage, vlib, finvm } = await loadLibs();
   const { ctx } = makeCtx(vlib, finvm, createEffectStorage);

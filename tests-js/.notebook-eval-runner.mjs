@@ -240,8 +240,31 @@ function shallowEqualJsonField(a, b) {
   }
   return String(a) === String(b);
 }
-function createFinvmHandlers(storage, fetchImpl = globalThis.fetch.bind(globalThis)) {
+function createFinvmHandlers(storage, fetchImpl = globalThis.fetch.bind(globalThis), signal) {
   return {
+    // Real `time.sleep@1` effect (EFFECT_AWAIT). A cell's `sleep`/`loopEvery`
+    // helper emits this so the loop cadence lives in the cell source. The
+    // generic effect payload passes the single arg through as `args`, so the
+    // ms count arrives as `p.args` (number) rather than a named field. Stop
+    // aborts the run controller, which rejects the pending sleep so the VM run
+    // unwinds promptly instead of waiting out the full delay.
+    "time.sleep": async (p) => {
+      const raw = p.ms ?? p.args ?? 0;
+      const ms = Math.max(0, Math.min(6e4, Math.trunc(Number(raw) || 0)));
+      if (signal?.aborted) throw new Error("sleep aborted");
+      await new Promise((resolve, reject) => {
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(new Error("sleep aborted"));
+        };
+        const timer = setTimeout(() => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        }, ms);
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+      return null;
+    },
     "http.get": async (p) => {
       const url = String(p.url ?? "");
       const res = await fetchImpl(url, { method: "GET" });
@@ -534,7 +557,7 @@ function compileNotebookProgram(vlib, src, bindingName) {
   const r = vlib.compileJS(src);
   return r.ok ? { ok: true, output: r.output, entry: "main" } : { ok: false, error: r.error };
 }
-async function runBindingOnFinvm(finvm, programJson, bindingName, finvmState, effectStorage, sourceSig) {
+async function runBindingOnFinvm(finvm, programJson, bindingName, finvmState, effectStorage, sourceSig, signal) {
   try {
     const program = JSON.parse(programJson);
     if (!program.functions) return { ok: false, error: "Invalid compiled program" };
@@ -548,7 +571,7 @@ async function runBindingOnFinvm(finvm, programJson, bindingName, finvmState, ef
       state: userState,
       machineSnapshot: snapshot,
       entryFunction: bindingName,
-      handlers: createFinvmHandlers(effectStorage)
+      handlers: createFinvmHandlers(effectStorage, void 0, signal)
     });
     if (!vmOut.ok) return { ok: false, error: vmOut.error };
     const dbState = effectDbTablesToFinvmState(effectStorage.listDbTables());
@@ -615,7 +638,8 @@ async function evalNotebookCells(ctx, source, names, opts) {
       entry,
       state,
       storage,
-      srcSig
+      srcSig,
+      opts?.signal
     );
     if (!run.ok) {
       outputs.push({ name, ok: false, typeSig: sigOf(name), error: run.error });

@@ -816,8 +816,8 @@ class VerdictEditorElement extends HTMLElement {
             },
             source,
             names,
-            opts?.cellId != null || opts?.cellIndex != null
-              ? { cell: { id: opts.cellId, index: opts.cellIndex } }
+            opts?.cellId != null || opts?.cellIndex != null || opts?.signal
+              ? { cell: { id: opts?.cellId, index: opts?.cellIndex }, signal: opts?.signal }
               : undefined,
           );
           // Notebook cells run on the shared FinVM session; reflect it in Debug/DB

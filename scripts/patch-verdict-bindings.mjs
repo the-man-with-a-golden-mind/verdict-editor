@@ -14,6 +14,7 @@ const actorPath = path.join(root, "lib/verdict/Actor.verdict");
 const idePath = path.join(root, "lib/verdict/IDE.verdict");
 const cellBusPath = path.join(root, "lib/verdict/CellBus.verdict");
 const displayPath = path.join(root, "lib/verdict/Display.verdict");
+const loopPath = path.join(root, "lib/verdict/Loop.verdict");
 const marketPath = path.join(root, "lib/verdict/Market.verdict");
 const outPath = path.join(root, "public/lib/verdict-notebook.mjs");
 
@@ -30,10 +31,12 @@ const actorSource = fs.readFileSync(actorPath, "utf8").trim();
 const ideSource = fs.readFileSync(idePath, "utf8").trim();
 const cellBusSource = fs.readFileSync(cellBusPath, "utf8").trim();
 const displaySource = fs.readFileSync(displayPath, "utf8").trim();
+const loopSource = fs.readFileSync(loopPath, "utf8").trim();
 const actorLibraryLiteral = JSON.stringify("\n" + actorSource + "\n");
 const ideLibraryLiteral = JSON.stringify("\n" + ideSource + "\n");
 const cellBusLibraryLiteral = JSON.stringify("\n" + cellBusSource + "\n");
 const displayLibraryLiteral = JSON.stringify("\n" + displaySource + "\n");
+const loopLibraryLiteral = JSON.stringify("\n" + loopSource + "\n");
 
 const libraryLinkHelpers = [
   "var usesActorLibrary = function(src) {",
@@ -47,6 +50,9 @@ const libraryLinkHelpers = [
   "};",
   "var usesDisplayLibrary = function(src) {",
   "  return /\\b(dText|dTrace|dLine|dArea|dStep|dMarkers|dChart|dChartY|dChartY2|dStack|dRow|dCol|dTable)\\b/.test(src);",
+  "};",
+  "var usesLoopLibrary = function(src) {",
+  "  return /\\b(sleep|loopEvery)\\b/.test(src);",
   "};",
   "var parseLibraryModule = function(source) {",
   "  var v = parseVerdict(source);",
@@ -71,6 +77,7 @@ const libraryLinkHelpers = [
   "  addLibraryDecls(usesIdeLibrary(src), ideLibrarySource, types, decls);",
   "  addLibraryDecls(usesCellBusLibrary(src), cellBusLibrarySource, types, decls);",
   "  addLibraryDecls(usesDisplayLibrary(src), displayLibrarySource, types, decls);",
+  "  addLibraryDecls(usesLoopLibrary(src), loopLibrarySource, types, decls);",
   "  var mergedTypes = moduleTypes(userMod).concat(types);",
   "  var mergedDecls = moduleDecls(userMod).concat(decls);",
   "  var mergedUser = new Module(moduleName(userMod), mergedTypes, mergedDecls);",
@@ -117,7 +124,7 @@ code = code.replace(/\nvar ideLibrarySource = "[^"]*";?\n/g, "\n");
 code = code.replace(/\nvar usesActorLibrary = function[\s\S]*?\n\};\nvar linkBindingsModule[\s\S]*?\n\};\n/g, "\n");
 code = code.replace(
   /var preludeSource = '/,
-  `var actorLibrarySource = ${actorLibraryLiteral};\nvar ideLibrarySource = ${ideLibraryLiteral};\nvar cellBusLibrarySource = ${cellBusLibraryLiteral};\nvar displayLibrarySource = ${displayLibraryLiteral};\n${libraryLinkHelpers}var preludeSource = '`,
+  `var actorLibrarySource = ${actorLibraryLiteral};\nvar ideLibrarySource = ${ideLibraryLiteral};\nvar cellBusLibrarySource = ${cellBusLibraryLiteral};\nvar displayLibrarySource = ${displayLibraryLiteral};\nvar loopLibrarySource = ${loopLibraryLiteral};\n${libraryLinkHelpers}var preludeSource = '`,
 );
 
 code = code.replace(
@@ -240,6 +247,9 @@ code = code.replace(
     "  }",
     "  if (usesDisplayLibrary(src)) {",
     "    sigs = append9(sigs)(sigsOf(displayLibrarySource));",
+    "  }",
+    "  if (usesLoopLibrary(src)) {",
+    "    sigs = append9(sigs)(sigsOf(loopLibrarySource));",
     "  }",
     "  return sigs.map(function(s) { return { name: s.name, signature: prettifyTypeSig(s.signature) }; });",
     "};",

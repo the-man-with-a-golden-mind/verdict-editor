@@ -188,8 +188,32 @@ function shallowEqualJsonField(a: unknown, b: unknown): boolean {
 export function createFinvmHandlers(
   storage: EffectStorage,
   fetchImpl: typeof fetch = globalThis.fetch.bind(globalThis),
+  signal?: AbortSignal,
 ) {
   return {
+    // Real `time.sleep@1` effect (EFFECT_AWAIT). A cell's `sleep`/`loopEvery`
+    // helper emits this so the loop cadence lives in the cell source. The
+    // generic effect payload passes the single arg through as `args`, so the
+    // ms count arrives as `p.args` (number) rather than a named field. Stop
+    // aborts the run controller, which rejects the pending sleep so the VM run
+    // unwinds promptly instead of waiting out the full delay.
+    'time.sleep': async (p: { args?: unknown; ms?: unknown }) => {
+      const raw = p.ms ?? p.args ?? 0;
+      const ms = Math.max(0, Math.min(60000, Math.trunc(Number(raw) || 0)));
+      if (signal?.aborted) throw new Error('sleep aborted');
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(new Error('sleep aborted'));
+        };
+        const timer = setTimeout(() => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve();
+        }, ms);
+        signal?.addEventListener('abort', onAbort, { once: true });
+      });
+      return null;
+    },
     'http.get': async (p: { url?: string }) => {
       const url = String(p.url ?? '');
       const res = await fetchImpl(url, { method: 'GET' });
