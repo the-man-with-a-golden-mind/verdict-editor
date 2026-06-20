@@ -919,11 +919,16 @@ class VerdictEditorElement extends HTMLElement {
       const label = sec.kind === 'module' ? 'Module' : isText ? 'Text' : sec.kind === 'asset' ? 'Asset' : 'Runnable';
       num.textContent = `${sec.cellIndex + 1} · ${label}`;
       meta.appendChild(num);
-      const prev = document.createElement('div');
-      prev.className = 'truncate font-mono text-[11px] text-slate-300';
-      prev.textContent = sec.preview ?? '';
       navBtn.appendChild(meta);
-      navBtn.appendChild(prev);
+      // Only show a second line when the user has named the cell — never the raw
+      // source first line (it overflows the nav). Truncates to fit the panel.
+      const cellName = (sec.name ?? '').trim();
+      if (cellName) {
+        const nameEl = document.createElement('div');
+        nameEl.className = 'truncate font-mono text-[11px] text-slate-300';
+        nameEl.textContent = cellName;
+        navBtn.appendChild(nameEl);
+      }
       card.appendChild(navBtn);
 
       if (isRunnable) {

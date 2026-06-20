@@ -399,5 +399,12 @@ export function wrapVerdictLibForNotebook(
     ...(notebookLib.evalBindingsJsonJS
       ? { evalBindingsJsonJS: notebookLib.evalBindingsJsonJS.bind(notebookLib) }
       : {}),
+    // Diagnostics must use the notebook lib's compiler too: it links the Verdict
+    // libraries (CellBus, Loop, Display, Actor, IDE) the same way the run path
+    // does. The base verdict.mjs diagnosticsJS does not, so cells importing those
+    // libraries (e.g. busQueue/loopEvery) would show false "unknown name" errors.
+    ...(notebookLib.diagnosticsJS
+      ? { diagnosticsJS: notebookLib.diagnosticsJS.bind(notebookLib) }
+      : {}),
   };
 }

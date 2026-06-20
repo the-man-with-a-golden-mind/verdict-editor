@@ -276,19 +276,6 @@ body {
   overflow: visible;
 }
 
-.notebook-cell-editor-resizer,
-.notebook-cell-output-resizer {
-  height: 6px;
-  cursor: row-resize;
-  background: linear-gradient(to bottom, transparent, rgb(30 41 59 / 0.5), transparent);
-  flex-shrink: 0;
-}
-
-.notebook-cell-editor-resizer:hover,
-.notebook-cell-output-resizer:hover {
-  background: linear-gradient(to bottom, transparent, rgb(99 102 241 / 0.45), transparent);
-}
-
 .notebook-global-output-side {
   min-height: 3rem;
 }
@@ -315,11 +302,27 @@ body.notebook-resize-active * {
 }
 .notebook-stack-scroll::-webkit-scrollbar-thumb:hover { background: #64748b; background-clip: content-box; }
 
-/* Notebook: visible, easy-to-grab resize handles for input + output. */
+/* Notebook: visible, easy-to-grab resize handles for input + output. A taller
+   hit area (12px) with a centered grip line so it's obvious it can be dragged. */
 .notebook-cell-editor-resizer, .notebook-cell-output-resizer {
-  height: 8px; cursor: ns-resize; flex-shrink: 0;
-  background: linear-gradient(to bottom, transparent, rgba(71, 85, 105, 0.28));
+  height: 12px;
+  cursor: ns-resize;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(71, 85, 105, 0.18);
+}
+.notebook-cell-editor-resizer::after, .notebook-cell-output-resizer::after {
+  content: "";
+  width: 40px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(148, 163, 184, 0.55);
 }
 .notebook-cell-editor-resizer:hover, .notebook-cell-output-resizer:hover {
-  background: rgba(99, 102, 241, 0.40);
+  background: rgba(99, 102, 241, 0.28);
+}
+.notebook-cell-editor-resizer:hover::after, .notebook-cell-output-resizer:hover::after {
+  background: rgba(165, 180, 252, 0.95);
 }

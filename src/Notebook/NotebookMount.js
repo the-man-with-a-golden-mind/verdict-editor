@@ -1056,6 +1056,7 @@ export function mountNotebookImpl(selector) {
               cellIndex: i,
               cellId: cell.id,
               kind: cell.kind === "wysiwyg" ? "text" : isModuleCell(cell) ? "module" : "code",
+              name: cell.name ?? "",
               preview: getCellPreviewLine(cell),
               running: state.running.has(cell.id),
               focused: state.focusedId === cell.id,

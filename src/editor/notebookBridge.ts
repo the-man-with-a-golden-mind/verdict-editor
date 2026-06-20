@@ -20,6 +20,8 @@ export type CellsNavSection = {
   cellIndex: number;
   cellId: string;
   kind?: 'code' | 'text' | 'module' | 'asset';
+  /** User-assigned cell name (shown in the nav instead of the source preview). */
+  name?: string;
   preview?: string;
   running?: boolean;
   focused?: boolean;
