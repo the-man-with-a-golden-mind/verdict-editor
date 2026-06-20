@@ -78,6 +78,8 @@ export type NotebookApi = {
   getViewMode: () => string;
   /** Re-run every code cell once (top to bottom). */
   runAll?: () => void | Promise<void>;
+  /** Stop every in-flight cell run (used when the live loop is stopped). */
+  stopAll?: () => void;
   /** Run / stop / focus a cell by id — driven from the merged Cells panel. */
   runCellById?: (id: string) => void | Promise<void>;
   stopCellById?: (id: string) => void;

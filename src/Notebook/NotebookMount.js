@@ -466,6 +466,12 @@ export function mountNotebookImpl(selector) {
           },
           getViewMode: () => (bridge.isSourceMode?.() ? "source" : "notebook"),
           runAll: () => runAll(),
+          // Stop every in-flight cell run (used when the live loop is stopped).
+          stopAll: () => {
+            for (const c of state.cells) {
+              if (state.running.has(c.id)) stopCell(c);
+            }
+          },
           // Driven from the merged Cells panel in the editor shell.
           runCellById: (id) => {
             const i = state.cells.findIndex((c) => c.id === id);
@@ -642,6 +648,7 @@ export function mountNotebookImpl(selector) {
           state.running.add(cell.id);
           const ui = ensureUi(cell);
           updateNotebook({ tag: "setOutputFolded", id: cell.id, folded: false });
+          refreshCellGutter(cell, cellIdx);
           schedulePublishPanel();
           try {
             const cellNames = bindingNamesForRun(cell);
@@ -661,6 +668,7 @@ export function mountNotebookImpl(selector) {
             }
             state.running.delete(cell.id);
             delete state.runControllers[cell.id];
+            refreshCellGutter(cell, cellIdx);
             await refreshCellOutput(cell, cellIdx);
             schedulePublishPanel();
           }
@@ -925,6 +933,17 @@ export function mountNotebookImpl(selector) {
           }
           outHost.innerHTML = "";
           await fillOutputHost(outHost, cell, idx);
+        }
+
+        // Re-mount just this cell's gutter so the In [N]: execution count and the
+        // run/stop button reflect the current run state (Jupyter-style), without
+        // tearing down the editor/output. Used by run/stop and the live loop.
+        function refreshCellGutter(cell, idx) {
+          const gutter = stack.querySelector(`[data-cell-id="${cell.id}"] .notebook-cell-gutter`);
+          if (!gutter) return;
+          const ui = ensureUi(cell);
+          const isMax = state.maximizedCellId === cell.id;
+          appendCellGutterControls(gutter, cell, idx, ui, cell.kind === "code", isMax);
         }
 
         async function fillOutputHost(hostEl, cell, idx) {

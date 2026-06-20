@@ -272,6 +272,16 @@ class VerdictEditorElement extends HTMLElement {
   private telegramBotTokenInput: HTMLInputElement | null = null;
   private telegramChatIdInput: HTMLInputElement | null = null;
   private runToggleBtn: HTMLButtonElement | null = null;
+  private liveIntervalInput: HTMLInputElement | null = null;
+  // Live loop: when active, re-run every cell every `liveIntervalMs`. Each tick
+  // runs runProgram() (-> notebookApi.runAll()), which executes every cell
+  // against the shared FinVM session, so cell 1 fetches+strategizes and cell 2
+  // re-simulates on its own. `liveTimer` is the scheduled next tick; `liveBusy`
+  // guards against overlapping ticks when a run takes longer than the interval.
+  private liveTimer: number | null = null;
+  private liveActive = false;
+  private liveBusy = false;
+  private liveIntervalMs = 5000;
   private diagnosticsTimer: number | null = null;
   private busyCount = 0;
   private finvmState: Record<string, unknown> = {};
@@ -535,9 +545,28 @@ class VerdictEditorElement extends HTMLElement {
       'inline-flex items-center rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-emerald-200 transition-colors hover:bg-emerald-500/25';
     this.runToggleBtn.textContent = 'Run';
     this.runToggleBtn.onclick = () => {
-      void this.runProgram();
+      this.toggleLiveLoop();
     };
     startStopRow.appendChild(this.runToggleBtn);
+
+    // Live-loop interval (seconds): every tick re-runs all cells. Default 5s.
+    const everyLabel = document.createElement('span');
+    everyLabel.className = 'text-[10px] font-bold uppercase tracking-wider text-slate-500';
+    everyLabel.textContent = 'every';
+    this.liveIntervalInput = document.createElement('input');
+    this.liveIntervalInput.type = 'number';
+    this.liveIntervalInput.min = '1';
+    this.liveIntervalInput.value = '5';
+    this.liveIntervalInput.setAttribute('aria-label', 'Live re-run interval in seconds');
+    this.liveIntervalInput.className =
+      'w-12 rounded border border-slate-700 bg-slate-900 px-1.5 py-1 text-[10px] font-mono text-slate-300 outline-none focus:border-indigo-400';
+    this.liveIntervalInput.oninput = () => this.onLiveIntervalChanged();
+    const secLabel = document.createElement('span');
+    secLabel.className = 'text-[10px] font-bold uppercase tracking-wider text-slate-500';
+    secLabel.textContent = 's';
+    startStopRow.appendChild(everyLabel);
+    startStopRow.appendChild(this.liveIntervalInput);
+    startStopRow.appendChild(secLabel);
 
     const tabBar = document.createElement('div');
     tabBar.className = 'flex items-center gap-1 border-b border-slate-800 bg-slate-950 px-2 py-1.5';
@@ -1344,6 +1373,72 @@ class VerdictEditorElement extends HTMLElement {
   run() {
     if (!this.editor) return;
     void this.runProgram();
+  }
+
+  private onLiveIntervalChanged() {
+    const secs = Number(this.liveIntervalInput?.value);
+    if (Number.isFinite(secs) && secs >= 1) {
+      this.liveIntervalMs = Math.round(secs * 1000);
+    }
+  }
+
+  // Start/Stop the live loop. While active, every cell re-runs every
+  // `liveIntervalMs` against the shared FinVM session: the strategy cell keeps
+  // fetching + writing shared state, downstream cells re-read it and re-render
+  // their charts, all without user interaction.
+  private toggleLiveLoop() {
+    if (this.liveActive) this.stopLiveLoop();
+    else void this.startLiveLoop();
+  }
+
+  private async startLiveLoop() {
+    if (this.liveActive) return;
+    this.liveActive = true;
+    this.updateRunToggleUi();
+    // Run an immediate first tick, then schedule subsequent ones.
+    await this.liveTick();
+  }
+
+  private stopLiveLoop() {
+    this.liveActive = false;
+    if (this.liveTimer !== null) {
+      window.clearTimeout(this.liveTimer);
+      this.liveTimer = null;
+    }
+    this.notebookApi?.stopAll?.();
+    this.updateRunToggleUi();
+  }
+
+  private async liveTick() {
+    if (!this.liveActive) return;
+    if (!this.liveBusy) {
+      this.liveBusy = true;
+      try {
+        await this.runProgram();
+      } catch {
+        /* keep the loop alive across transient run errors */
+      } finally {
+        this.liveBusy = false;
+      }
+    }
+    if (!this.liveActive) return;
+    this.liveTimer = window.setTimeout(() => {
+      this.liveTimer = null;
+      void this.liveTick();
+    }, this.liveIntervalMs);
+  }
+
+  private updateRunToggleUi() {
+    if (!this.runToggleBtn) return;
+    if (this.liveActive) {
+      this.runToggleBtn.textContent = 'Stop';
+      this.runToggleBtn.className =
+        'inline-flex items-center rounded-md border border-rose-500/40 bg-rose-500/15 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-rose-200 transition-colors hover:bg-rose-500/25';
+    } else {
+      this.runToggleBtn.textContent = 'Run';
+      this.runToggleBtn.className =
+        'inline-flex items-center rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-emerald-200 transition-colors hover:bg-emerald-500/25';
+    }
   }
 
   private async runProgram() {
@@ -2212,6 +2307,7 @@ class VerdictEditorElement extends HTMLElement {
   }
 
   disconnectedCallback() {
+    this.stopLiveLoop();
     if (this.diagnosticsTimer !== null) {
       window.clearTimeout(this.diagnosticsTimer);
       this.diagnosticsTimer = null;

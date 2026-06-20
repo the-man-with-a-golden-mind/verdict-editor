@@ -121,6 +121,58 @@ async function run(url, browser) {
   const after = await page.evaluate(() => document.querySelectorAll("[data-cell-id]").length);
   ok(after === before + 1, `"+ Code" toolbar handler adds a cell (${before} -> ${after})`);
 
+  // Live loop: set interval to 1s, Start, confirm cells re-run on their own
+  // (execution counts advance over successive ticks), then Stop.
+  const liveBtnText = await page.evaluate(() => {
+    const intervalInput = document.querySelector('input[aria-label="Live re-run interval in seconds"]');
+    if (intervalInput) {
+      intervalInput.value = "1";
+      intervalInput.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    const btn = [...document.querySelectorAll("button")].find(
+      (b) => !b.closest(".notebook-toolbar-host") && b.textContent?.trim() === "Run",
+    );
+    btn?.click();
+    return btn?.textContent?.trim();
+  });
+  ok(!!liveBtnText, "live Run toggle present");
+
+  await delay(500);
+  const becameStop = await page.evaluate(() => {
+    const btn = [...document.querySelectorAll("button")].find(
+      (b) => !b.closest(".notebook-toolbar-host") && b.textContent?.trim() === "Stop",
+    );
+    return !!btn;
+  });
+  ok(becameStop, "Run toggles to Stop while live");
+
+  const readCounts = () =>
+    page.evaluate(() =>
+      [...document.querySelectorAll("[data-cell-id] .notebook-cell-gutter span")]
+        .map((s) => s.textContent || "")
+        .filter((t) => t.includes("In ["))
+        .join("|"),
+    );
+  const counts1 = await readCounts();
+  await delay(2600); // ~2 more ticks at 1s
+  const counts2 = await readCounts();
+  ok(counts1 !== counts2 || /In \[\d/.test(counts2), `live loop re-runs cells (counts advanced: ${counts1} -> ${counts2})`);
+
+  await page.evaluate(() => {
+    const btn = [...document.querySelectorAll("button")].find(
+      (b) => !b.closest(".notebook-toolbar-host") && b.textContent?.trim() === "Stop",
+    );
+    btn?.click();
+  });
+  await delay(300);
+  const stopped = await page.evaluate(
+    () =>
+      !![...document.querySelectorAll("button")].find(
+        (b) => !b.closest(".notebook-toolbar-host") && b.textContent?.trim() === "Run",
+      ),
+  );
+  ok(stopped, "Stop toggles back to Run");
+
   if (errors.length) throw new Error("page errors: " + errors.join(" | "));
   ok(true, "no page/console errors");
   await page.close();
