@@ -674,8 +674,11 @@ export function mountNotebookImpl(selector) {
 
         // The inter-iteration delay, read from the cell's `loopEvery(ms, …)` or
         // `sleep(ms)` call. The scheduler applies it between renders (see runCell).
+        // Inputs are materialized first so `loopEvery(__INPUT_loopIntervalMs__, …)`
+        // resolves to its numeric value.
         function loopCadenceMs(cell) {
-          const m = String(cell.source ?? "").match(/\b(?:loopEvery|sleep)\s*\(\s*(\d+)/);
+          const src = bridge.materialize?.(cell.source ?? "") ?? cell.source ?? "";
+          const m = String(src).match(/\b(?:loopEvery|sleep)\s*\(\s*(\d+)/);
           const ms = m ? parseInt(m[1], 10) : 1000;
           return Math.min(Math.max(ms, 250), 600000);
         }

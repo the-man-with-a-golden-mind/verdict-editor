@@ -90,7 +90,7 @@ export const DEFAULT_NOTEBOOK_DECISION_CELL_LINES = [
   "  else",
   "    let prevCsv = histCsvOrEmpty(trimmed) in",
   "    let px = fetchPriceCents(trimmed) in",
-  "    let csv = boundedHistCsv(240, prevCsv, px) in",
+  "    let csv = boundedHistCsv(__INPUT_historyCap__, prevCsv, px) in",
   "    let _save = saveHistCsv(trimmed, csv) in",
   "    let window = lastN(20, parseCsvInts(csv)) in",
   "    let threshold = __INPUT_signalThreshold__ in",
@@ -117,5 +117,5 @@ export const DEFAULT_NOTEBOOK_DECISION_CELL_LINES = [
   "-- Endless loop: run one tick, then sleep 5s (the cadence is in the cell, not",
   "-- the environment). The notebook re-runs this cell after each sleep.",
   "main : String",
-  "main = loopEvery(5000, runTick)",
+  "main = loopEvery(__INPUT_loopIntervalMs__, runTick)",
 ];

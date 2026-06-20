@@ -84,5 +84,5 @@ export const DEFAULT_NOTEBOOK_SIM_CELL_LINES = [
   '',
   '-- Endless loop: rebuild the report, then sleep 5s. Stop ends it.',
   'simReport : Json',
-  'simReport = loopEvery(5000, buildReport)',
+  'simReport = loopEvery(__INPUT_loopIntervalMs__, buildReport)',
 ];
