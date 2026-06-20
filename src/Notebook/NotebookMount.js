@@ -79,19 +79,25 @@ function persist(state, bridge) {
   });
 }
 
-function installVerticalResize(handle, getHeight, setHeight, { min = 72, max = 720 } = {}) {
+// `onLive` runs on every drag step and must be CHEAP (DOM only — no model rebuild
+// or persist). `onCommit` runs once on release with the final height (update the
+// model + persist there). This avoids recreating the cell array / writing
+// localStorage on every pixel, which scrambled the layout.
+function installVerticalResize(handle, getHeight, onLive, { min = 72, max = 720, onCommit } = {}) {
   handle.addEventListener("mousedown", (event) => {
     event.preventDefault();
     const startY = event.clientY;
     const startH = getHeight();
+    let lastH = startH;
     const onMove = (moveEvent) => {
-      const next = Math.min(max, Math.max(min, startH + (moveEvent.clientY - startY)));
-      setHeight(next);
+      lastH = Math.min(max, Math.max(min, startH + (moveEvent.clientY - startY)));
+      onLive(lastH);
     };
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       document.body.classList.remove("notebook-resize-active");
+      if (onCommit) onCommit(lastH);
     };
     document.body.classList.add("notebook-resize-active");
     window.addEventListener("mousemove", onMove);
@@ -1012,10 +1018,6 @@ export function mountNotebookImpl(selector) {
 
           if (isRunnableCell(cell) && idx > 0) add("Run above", () => void runAbove(idx));
           if (isCodeCell) add("Save file", () => downloadCellFile(cell));
-          add(isMax ? "Minimize" : "Maximize", () => {
-            updateNotebook({ tag: "maximize", id: cell.id });
-            render();
-          });
           add("Insert code below", () => addCellBelow(idx, "code"), { sepBefore: true });
           add("Insert text below", () => addCellBelow(idx, "wysiwyg"));
           if (idx > 0) add("Move up", () => moveCellBy(idx, -1));
@@ -1192,13 +1194,17 @@ export function mountNotebookImpl(selector) {
               editorResizer,
               () => parseInt(editorHost.style.height, 10) || contentH,
               (height) => {
-                const next = Math.round(height);
-                editorHost.style.height = `${next}px`;
+                editorHost.style.height = `${Math.round(height)}px`;
                 if (state.sharedEditorCellId === cell.id) state.sharedEditor?.view?.requestMeasure?.();
-                updateNotebook({ tag: "setEditorHeight", id: cell.id, height: next });
-                persist(state, bridge);
               },
-              { min: 48, max: maxEditorH },
+              {
+                min: 48,
+                max: maxEditorH,
+                onCommit: (height) => {
+                  updateNotebook({ tag: "setEditorHeight", id: cell.id, height: Math.round(height) });
+                  persist(state, bridge);
+                },
+              },
             );
             body.appendChild(editorResizer);
           }
@@ -1231,12 +1237,16 @@ export function mountNotebookImpl(selector) {
                 outputResizer,
                 () => Math.max(ui.outputHeight, 96),
                 (height) => {
-                  const nextHeight = Math.round(height);
-                  updateNotebook({ tag: "setOutputHeight", id: cell.id, height: nextHeight });
-                  outHost.style.maxHeight = `${nextHeight}px`;
-                  persist(state, bridge);
+                  outHost.style.maxHeight = `${Math.round(height)}px`;
                 },
-                { min: 96, max: 1200 },
+                {
+                  min: 96,
+                  max: 1200,
+                  onCommit: (height) => {
+                    updateNotebook({ tag: "setOutputHeight", id: cell.id, height: Math.round(height) });
+                    persist(state, bridge);
+                  },
+                },
               );
               body.appendChild(outputResizer);
             }
