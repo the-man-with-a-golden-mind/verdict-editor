@@ -40,25 +40,10 @@ function makeCtx(vlib, finvm, createEffectStorage) {
   };
 }
 
-test("FinVM: loopEvery sleeps via real time.sleep effect and returns step result", async () => {
-  const { evalNotebookCells, createEffectStorage, vlib, finvm } = await loadLibs();
-  const { ctx } = makeCtx(vlib, finvm, createEffectStorage);
-  const src = `module Main exposing (main)
-
-main : Int
-main = loopEvery(20, step)
-
-step : Unit -> Int
-step _ = 7
-`;
-  const t0 = Date.now();
-  const out = await evalNotebookCells(ctx, src, ["main"]);
-  assert.equal(out[0]?.ok, true, out[0]?.error);
-  assert.match(String(out[0]?.display?.text), /7/);
-  assert.ok(Date.now() - t0 >= 15, "the real time.sleep effect should delay the run");
-});
-
-test("FinVM: aborting a sleeping cell rejects the pending sleep promptly", async () => {
+test("FinVM: loopEvery runs step and returns its result without blocking", async () => {
+  // loopEvery no longer sleeps in-eval; the notebook scheduler applies the
+  // cadence BETWEEN renders so output is visible before the wait. So the eval
+  // itself just runs step and returns its result, promptly.
   const { evalNotebookCells, createEffectStorage, vlib, finvm } = await loadLibs();
   const { ctx } = makeCtx(vlib, finvm, createEffectStorage);
   const src = `module Main exposing (main)
@@ -68,6 +53,25 @@ main = loopEvery(5000, step)
 
 step : Unit -> Int
 step _ = 7
+`;
+  const t0 = Date.now();
+  const out = await evalNotebookCells(ctx, src, ["main"]);
+  assert.equal(out[0]?.ok, true, out[0]?.error);
+  assert.match(String(out[0]?.display?.text), /7/);
+  assert.ok(Date.now() - t0 < 4000, "loopEvery must not block on a 5s sleep");
+});
+
+test("FinVM: aborting a sleeping cell rejects the pending sleep promptly", async () => {
+  // `sleep` (used directly, e.g. by an actor) still blocks in-eval and is
+  // abortable via the run signal.
+  const { evalNotebookCells, createEffectStorage, vlib, finvm } = await loadLibs();
+  const { ctx } = makeCtx(vlib, finvm, createEffectStorage);
+  const src = `module Main exposing (main)
+
+main : Int
+main =
+  let _ = sleep(5000) in
+  7
 `;
   const ac = new AbortController();
   const t0 = Date.now();

@@ -39,6 +39,6 @@ defaultCellUi =
   , outputFolded: false
   , editorHeight: 160
   , editorResized: false
-  , outputHeight: 180
+  , outputHeight: 480
   , outputResized: false
   }

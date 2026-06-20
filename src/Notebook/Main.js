@@ -22,7 +22,7 @@ function normalizeCellUi(ui) {
     outputFolded: Boolean(ui?.outputFolded),
     editorHeight: Number.isFinite(ui?.editorHeight) ? Math.round(ui.editorHeight) : 160,
     editorResized: Boolean(ui?.editorResized),
-    outputHeight: Number.isFinite(ui?.outputHeight) ? Math.round(ui.outputHeight) : 180,
+    outputHeight: Number.isFinite(ui?.outputHeight) ? Math.round(ui.outputHeight) : 480,
     outputResized: Boolean(ui?.outputResized),
   };
 }

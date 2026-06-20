@@ -904,6 +904,10 @@ class VerdictEditorElement extends HTMLElement {
       card.className =
         'flex items-center gap-2 rounded-lg border px-2.5 py-1.5 ' +
         (sec.focused ? 'border-indigo-400/60 bg-indigo-500/10' : 'border-slate-800/80 bg-slate-900/40');
+      card.oncontextmenu = (e) => {
+        e.preventDefault();
+        this.openCellNavMenu(e.clientX, e.clientY, sec.cellId, sec.cellIndex);
+      };
 
       const navBtn = document.createElement('button');
       navBtn.type = 'button';
@@ -958,6 +962,39 @@ class VerdictEditorElement extends HTMLElement {
       card.appendChild(dot);
       host.appendChild(card);
     }
+  }
+
+  /** Right-click menu on a cell-nav card: run / focus / remove the cell. */
+  private openCellNavMenu(x: number, y: number, cellId: string, cellIndex: number) {
+    document.querySelector('.notebook-nav-context-menu')?.remove();
+    const menu = document.createElement('div');
+    menu.className =
+      'notebook-nav-context-menu fixed z-50 min-w-[150px] rounded-md border border-slate-700 bg-slate-900 py-1 text-xs text-slate-200 shadow-xl';
+    menu.style.left = `${Math.min(x, window.innerWidth - 170)}px`;
+    menu.style.top = `${Math.min(y, window.innerHeight - 120)}px`;
+    const item = (label: string, danger: boolean, onClick: () => void) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className =
+        'block w-full px-3 py-1.5 text-left hover:bg-slate-800 ' + (danger ? 'text-rose-300 hover:text-rose-200' : '');
+      b.textContent = label;
+      b.onclick = () => {
+        menu.remove();
+        onClick();
+      };
+      menu.appendChild(b);
+    };
+    item('Run', false, () => void this.notebookApi?.runCellById?.(cellId));
+    item('Focus', false, () => this.notebookApi?.focusCellById?.(cellId));
+    item(`Remove cell ${cellIndex + 1}`, true, () => this.notebookApi?.deleteCellById?.(cellId));
+    document.body.appendChild(menu);
+    const dismiss = (ev: MouseEvent) => {
+      if (!menu.contains(ev.target as Node)) {
+        menu.remove();
+        document.removeEventListener('mousedown', dismiss);
+      }
+    };
+    setTimeout(() => document.addEventListener('mousedown', dismiss), 0);
   }
 
   private setActiveSideTab(tab: 'cells' | 'inputs') {

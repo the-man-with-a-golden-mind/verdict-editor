@@ -7,11 +7,12 @@ module Loop exposing (sleep, loopEvery)
 sleep : Int -> Unit
 sleep ms = builtin("time.sleep@1", ms)
 
--- One iteration of an in-cell loop: run `step`, then sleep `ms`. The notebook's
--- Run re-invokes the cell while it is looping, so each pass does work and then
--- waits `ms` via the real sleep effect; Stop aborts the pending sleep.
+-- One iteration of an in-cell loop: just run `step` and return its result. The
+-- notebook renders that result, THEN waits `ms` before re-invoking the cell, so
+-- output is visible before the wait (the cadence `ms` is read from this call by
+-- the notebook scheduler). `ms` is kept in the signature so the delay stays
+-- declared in the cell source. Use `sleep` directly for an in-eval block.
 loopEvery : Int -> (Unit -> a) -> a
 loopEvery ms step =
-  let result = step(unit) in
-  let _ = sleep(ms) in
-  result
+  let _ = ms in
+  step(unit)

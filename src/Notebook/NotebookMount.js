@@ -136,10 +136,12 @@ export function mountNotebookImpl(selector) {
           cachedDocs: new Map(),
           maximizedCellId: null,
           running: new Set(),
-          // Cells whose Run started an in-cell loop. The cell keeps re-running
-          // (driven by its own `time.sleep` cadence) until Stop clears it. Loops
-          // are PER CELL and independent.
+          // Cells whose Run started an in-cell loop. The cell renders its output,
+          // then the scheduler waits the cell's declared cadence (loopEvery/sleep
+          // ms) before re-running it — so output is visible BEFORE the wait, not
+          // after. Loops are PER CELL and independent; Stop clears them.
           cellLoops: new Set(),
+          loopTimers: {},
           runControllers: {},
           executionCounts: {},
           executionSeq: 0,
@@ -504,6 +506,10 @@ export function mountNotebookImpl(selector) {
           focusCellById: (id) => {
             focusCell(id);
           },
+          deleteCellById: (id) => {
+            const i = state.cells.findIndex((c) => c.id === id);
+            if (i >= 0) deleteCellAt(i);
+          },
           notebookCells: () =>
             state.cells.map((c) => ({
               id: c.id,
@@ -666,6 +672,14 @@ export function mountNotebookImpl(selector) {
           return isRunnableCell(cell) && /\b(loopEvery|sleep)\b/.test(cell.source ?? "");
         }
 
+        // The inter-iteration delay, read from the cell's `loopEvery(ms, …)` or
+        // `sleep(ms)` call. The scheduler applies it between renders (see runCell).
+        function loopCadenceMs(cell) {
+          const m = String(cell.source ?? "").match(/\b(?:loopEvery|sleep)\s*\(\s*(\d+)/);
+          const ms = m ? parseInt(m[1], 10) : 1000;
+          return Math.min(Math.max(ms, 250), 600000);
+        }
+
         // Single source of truth for the 3-color status dot, shared by the
         // gutter and the Cells nav: orange while running/looping, red on the
         // last error, green when the last run produced output, else gray.
@@ -725,15 +739,27 @@ export function mountNotebookImpl(selector) {
             refreshCellGutter(cell, cellIdx);
             await refreshCellOutput(cell, cellIdx);
             schedulePublishPanel();
+            // Output is now rendered. Wait the cell's declared cadence, THEN
+            // re-run — the inter-iteration delay lives between renders, so the
+            // user sees each result immediately instead of after the wait.
             if (shouldLoop) {
-              const nextIdx = state.cells.findIndex((c) => c.id === cell.id);
-              if (nextIdx >= 0) void runCell(state.cells[nextIdx], nextIdx, { looping: true });
+              const ms = loopCadenceMs(cell);
+              state.loopTimers[cell.id] = window.setTimeout(() => {
+                delete state.loopTimers[cell.id];
+                if (!state.cellLoops.has(cell.id)) return;
+                const nextIdx = state.cells.findIndex((c) => c.id === cell.id);
+                if (nextIdx >= 0) void runCell(state.cells[nextIdx], nextIdx, { looping: true });
+              }, ms);
             }
           }
         }
 
         function stopCell(cell) {
           state.cellLoops.delete(cell.id);
+          if (state.loopTimers[cell.id]) {
+            window.clearTimeout(state.loopTimers[cell.id]);
+            delete state.loopTimers[cell.id];
+          }
           const controller = state.runControllers[cell.id];
           if (controller) controller.abort();
           state.running.delete(cell.id);
@@ -1069,7 +1095,9 @@ export function mountNotebookImpl(selector) {
               kind: cell.kind === "wysiwyg" ? "text" : isModuleCell(cell) ? "module" : "code",
               name: cell.name ?? "",
               preview: getCellPreviewLine(cell),
-              running: state.running.has(cell.id),
+              // "running" for the nav includes a loop waiting between iterations,
+              // so the Stop button + status dot stay visible during the cadence.
+              running: state.running.has(cell.id) || state.cellLoops.has(cell.id),
               focused: state.focusedId === cell.id,
               hasOutput: allOutputs.length > 0 || Boolean(state.errors[cell.id]),
             });
