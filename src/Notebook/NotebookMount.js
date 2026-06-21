@@ -136,12 +136,6 @@ export function mountNotebookImpl(selector) {
           cachedDocs: new Map(),
           maximizedCellId: null,
           running: new Set(),
-          // Cells whose Run started an in-cell loop. The cell renders its output,
-          // then the scheduler waits the cell's declared cadence (loopEvery/sleep
-          // ms) before re-running it — so output is visible BEFORE the wait, not
-          // after. Loops are PER CELL and independent; Stop clears them.
-          cellLoops: new Set(),
-          loopTimers: {},
           // Latest Display value a cell emitted live (actor → output). Rendered
           // immediately on emit and re-rendered when the cell's output redraws.
           liveEmit: {},
@@ -695,104 +689,58 @@ export function mountNotebookImpl(selector) {
           return [...names];
         }
 
-        // A cell drives its own loop when its source uses the Loop library
-        // (`loopEvery`/`sleep`). The cadence is the millisecond arg in the cell
-        // source — nothing hidden, nothing global.
-        function isLoopCell(cell) {
-          return isRunnableCell(cell) && /\b(loopEvery|sleep)\b/.test(cell.source ?? "");
-        }
-
-        // The inter-iteration delay, read from the cell's `loopEvery(ms, …)` or
-        // `sleep(ms)` call. The scheduler applies it between renders (see runCell).
-        // Inputs are materialized first so `loopEvery(__INPUT_loopIntervalMs__, …)`
-        // resolves to its numeric value.
-        function loopCadenceMs(cell) {
-          const src = bridge.materialize?.(cell.source ?? "") ?? cell.source ?? "";
-          const m = String(src).match(/\b(?:loopEvery|sleep)\s*\(\s*(\d+)/);
-          const ms = m ? parseInt(m[1], 10) : 1000;
-          return Math.min(Math.max(ms, 250), 600000);
-        }
-
         // Single source of truth for the 3-color status dot, shared by the
-        // gutter and the Cells nav: orange while running/looping, red on the
+        // gutter and the Cells nav: orange while running (a looping cell is an
+        // actor whose eval runs until Stop, so it stays "running"), red on the
         // last error, green when the last run produced output, else gray.
         function cellStatus(cell) {
-          if (state.running.has(cell.id) || state.cellLoops.has(cell.id)) return "running";
+          if (state.running.has(cell.id)) return "running";
           if (state.errors[cell.id]) return "error";
           if (cellHasOutput(cell)) return "ok";
           return "idle";
         }
 
-        async function runCell(cell, cellIdx, opts = {}) {
+        async function runCell(cell, cellIdx) {
           if (!isRunnableCell(cell)) return;
-          // A loop re-runs the same cell, so allow the loop's own re-entry
-          // (looping flag) past the in-flight guard.
-          if (state.running.has(cell.id) && !opts.looping) return;
-          // Starting Run on a loop cell registers the loop before the first run
-          // so the status reflects "looping" immediately.
-          if (!opts.looping && isLoopCell(cell)) state.cellLoops.add(cell.id);
+          if (state.running.has(cell.id)) return;
+          ensureUi(cell);
           syncSharedEditorSource();
           const controller = new AbortController();
           state.runControllers[cell.id] = controller;
           state.running.add(cell.id);
-          const ui = ensureUi(cell);
           updateNotebook({ tag: "setOutputFolded", id: cell.id, folded: false });
           refreshCellGutter(cell, cellIdx);
           schedulePublishPanel();
-          let iterationErrored = false;
           try {
             const cellNames = bindingNamesForRun(cell);
             if (cellNames.length === 0) {
               state.errors[cell.id] = "";
               return;
             }
+            // The cell's own code decides whether it loops (an actor's eval runs
+            // until Stop). The host just runs it once and waits — no host-side
+            // re-run scheduler, so the cell behaves identically off the IDE.
             const outs = await evalCellOutputs(cell, cellIdx, controller.signal);
             if (controller.signal.aborted) return;
             applyEvalResults(outs, cellIdx, cell.id);
-            if (state.errors[cell.id]) iterationErrored = true;
           } catch (e) {
             if (!controller.signal.aborted) {
               state.errors[cell.id] = String(e);
-              iterationErrored = true;
             }
           } finally {
-            const aborted = controller.signal.aborted;
-            if (!aborted) {
+            if (!controller.signal.aborted) {
               state.executionSeq += 1;
               state.executionCounts[cell.id] = state.executionSeq;
             }
             state.running.delete(cell.id);
             delete state.runControllers[cell.id];
-            // Keep the loop alive while it is still registered and healthy; an
-            // error or Stop ends it (Stop already cleared cellLoops). The next
-            // pass runs immediately — the cell's own `time.sleep` already
-            // provided the inter-iteration delay during this run.
-            const shouldLoop = !aborted && !iterationErrored && state.cellLoops.has(cell.id);
-            if (iterationErrored) state.cellLoops.delete(cell.id);
             refreshCellGutter(cell, cellIdx);
             await refreshCellOutput(cell, cellIdx);
             schedulePublishPanel();
-            // Output is now rendered. Wait the cell's declared cadence, THEN
-            // re-run — the inter-iteration delay lives between renders, so the
-            // user sees each result immediately instead of after the wait.
-            if (shouldLoop) {
-              const ms = loopCadenceMs(cell);
-              state.loopTimers[cell.id] = window.setTimeout(() => {
-                delete state.loopTimers[cell.id];
-                if (!state.cellLoops.has(cell.id)) return;
-                const nextIdx = state.cells.findIndex((c) => c.id === cell.id);
-                if (nextIdx >= 0) void runCell(state.cells[nextIdx], nextIdx, { looping: true });
-              }, ms);
-            }
           }
         }
 
         function stopCell(cell) {
-          state.cellLoops.delete(cell.id);
-          if (state.loopTimers[cell.id]) {
-            window.clearTimeout(state.loopTimers[cell.id]);
-            delete state.loopTimers[cell.id];
-          }
           const controller = state.runControllers[cell.id];
           if (controller) controller.abort();
           state.running.delete(cell.id);
@@ -802,16 +750,16 @@ export function mountNotebookImpl(selector) {
           schedulePublishPanel();
         }
 
-        async function runAll() {
-          for (let i = 0; i < state.cells.length; i++) {
-            await runCell(state.cells[i], i);
-          }
+        function runAll() {
+          // Fire every runnable cell WITHOUT awaiting: an actor cell loops until
+          // Stop, so awaiting it in sequence would hang Run-all on the first
+          // looping cell. They run concurrently (interleaved on the worker);
+          // cross-cell data flows through the shared storage.
+          state.cells.forEach((cell, i) => void runCell(cell, i));
         }
 
-        async function runAbove(cellIdx) {
-          for (let i = 0; i <= cellIdx; i++) {
-            await runCell(state.cells[i], i);
-          }
+        function runAbove(cellIdx) {
+          for (let i = 0; i <= cellIdx; i++) void runCell(state.cells[i], i);
         }
 
         // --- Cell management (operate on whole cell objects so `ui` is preserved) ---
@@ -1133,9 +1081,7 @@ export function mountNotebookImpl(selector) {
               kind: cell.kind === "wysiwyg" ? "text" : isModuleCell(cell) ? "module" : "code",
               name: cell.name ?? "",
               preview: getCellPreviewLine(cell),
-              // "running" for the nav includes a loop waiting between iterations,
-              // so the Stop button + status dot stay visible during the cadence.
-              running: state.running.has(cell.id) || state.cellLoops.has(cell.id),
+              running: state.running.has(cell.id),
               focused: state.focusedId === cell.id,
               hasOutput: allOutputs.length > 0 || Boolean(state.errors[cell.id]),
             });

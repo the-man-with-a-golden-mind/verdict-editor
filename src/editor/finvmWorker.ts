@@ -79,7 +79,14 @@ self.onmessage = async (e: MessageEvent<InMsg>) => {
     return;
   }
   if (msg.type === 'finvmState') {
-    post({ type: 'finvmState', id: msg.id, state: finvmState });
+    // Merge the LIVE DB tables: a looping (endless) cell never returns, so the
+    // snapshot's persisted state is stale, but the effect storage is written on
+    // every tick. The DB/Debug tabs query this to see current data mid-run.
+    post({
+      type: 'finvmState',
+      id: msg.id,
+      state: { ...finvmState, '__finvm.db': effectDbTablesToFinvmState(storage.listDbTables()) },
+    });
     return;
   }
   if (msg.type === 'runProgram') {

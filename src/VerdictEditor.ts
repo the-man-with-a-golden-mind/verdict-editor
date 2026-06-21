@@ -292,6 +292,7 @@ class VerdictEditorElement extends HTMLElement {
   private effectStorage: EffectStorage | null = null;
   private finvmWorker: FinvmWorkerClient | null = null;
   private finvmWorkerFailed = false;
+  private dbDebugPollTimer: number | null = null;
   private languageAnalysisSig = '';
   private languageAnalysis = {
     diagnostics: [] as VerdictDiagnostic[],
@@ -1135,9 +1136,18 @@ class VerdictEditorElement extends HTMLElement {
       this.vizDirty = true;
       void this.refreshVisualization();
     }
-    if (tab === 'debug' && this.finvmState && Object.keys(this.finvmState).length > 0) {
-      // Show the current shared FinVM session (populated by notebook cell runs).
-      this.renderVmState(this.finvmState);
+    if (tab === 'debug' || tab === 'db') {
+      // The FinVM session lives in the worker now; pull the latest (incl. live DB
+      // tables) when the tab opens, and poll while it stays open so it updates
+      // during an endless (actor) run that never returns a result.
+      this.startDbDebugPoll();
+      void this.syncFinvmFromWorker().then(() => {
+        if (this.activeMainTab !== tab) return;
+        if (tab === 'debug') this.renderVmState(this.finvmState);
+        else this.refreshDbQueryOutput();
+      });
+    } else {
+      this.stopDbDebugPoll();
     }
     this.updateWorkspaceChrome();
     const tabButtons = this.mainContainer.querySelectorAll<HTMLButtonElement>('[data-main-tab-id]');
@@ -2326,6 +2336,42 @@ class VerdictEditorElement extends HTMLElement {
     wrapper.appendChild(sigNote);
 
     return wrapper;
+  }
+
+  /** Pull the FinVM session (incl. live DB tables) from the worker into the main
+   * thread so the DB/Debug tabs reflect it. The worker owns the authoritative
+   * state; a looping cell never returns a result, so we ask on demand. */
+  private async syncFinvmFromWorker(): Promise<void> {
+    const worker = this.ensureFinvmWorker();
+    if (!worker) return;
+    try {
+      const s = await worker.getFinvmState();
+      if (s && typeof s === 'object') this.finvmState = s;
+    } catch {
+      /* keep the last-known state */
+    }
+  }
+
+  private startDbDebugPoll(): void {
+    this.stopDbDebugPoll();
+    this.dbDebugPollTimer = window.setInterval(() => {
+      const tab = this.activeMainTab;
+      if (tab !== 'db' && tab !== 'debug') {
+        this.stopDbDebugPoll();
+        return;
+      }
+      void this.syncFinvmFromWorker().then(() => {
+        if (this.activeMainTab === 'debug') this.renderVmState(this.finvmState);
+        else if (this.activeMainTab === 'db') this.refreshDbQueryOutput();
+      });
+    }, 2000);
+  }
+
+  private stopDbDebugPoll(): void {
+    if (this.dbDebugPollTimer != null) {
+      window.clearInterval(this.dbDebugPollTimer);
+      this.dbDebugPollTimer = null;
+    }
   }
 
   /** Lazily create the FinVM worker; null (→ main-thread fallback) if it can't. */
