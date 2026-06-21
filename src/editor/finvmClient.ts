@@ -14,6 +14,8 @@ export class FinvmWorkerClient {
   private pending = new Map<string, (r: EvalResult) => void>();
   private emitHandlers = new Map<string, (cellId: string | undefined, value: unknown) => void>();
   private stateResolvers = new Map<string, (s: Record<string, unknown>) => void>();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private programResolvers = new Map<string, (r: any) => void>();
 
   constructor() {
     this.worker = new Worker(new URL('./finvmWorker.ts', import.meta.url), { type: 'module' });
@@ -32,6 +34,12 @@ export class FinvmWorkerClient {
         if (r) {
           this.stateResolvers.delete(m.id);
           r(m.state ?? {});
+        }
+      } else if (m?.type === 'program') {
+        const r = this.programResolvers.get(m.id);
+        if (r) {
+          this.programResolvers.delete(m.id);
+          r(m);
         }
       }
     };
@@ -71,6 +79,20 @@ export class FinvmWorkerClient {
     return new Promise((resolve) => {
       this.stateResolvers.set(id, resolve);
       this.worker.postMessage({ type: 'finvmState', id });
+    });
+  }
+
+  runProgram(
+    programJson: string,
+    source: string,
+    entry: string,
+    persistState: boolean,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ): Promise<any> {
+    const id = String(++this.counter);
+    return new Promise((resolve) => {
+      this.programResolvers.set(id, resolve);
+      this.worker.postMessage({ type: 'runProgram', id, programJson, source, entry, persistState });
     });
   }
 }

@@ -2303,6 +2303,27 @@ class VerdictEditorElement extends HTMLElement {
       const program = JSON.parse(programJson);
       const source = this.materializeInputs(this.getProgramSource());
       const srcSig = sourceSignature(source);
+      // Run the whole program on the worker too, so it never blocks the UI and
+      // shares the same FinVM session as the notebook cells.
+      const worker = this.ensureFinvmWorker();
+      if (worker) {
+        const entry0 = typeof program.entrypoint === 'string' ? program.entrypoint : 'main';
+        try {
+          const r = await worker.runProgram(JSON.stringify(program), source, entry0, persistState);
+          if (!r.ok) return { ok: false, error: r.error };
+          this.lastVmSteps = r.steps;
+          this.finvmState = r.finvmState;
+          if (this.vmStatePanel) {
+            this.renderVmState({ status: r.vmStatus, steps: r.steps, result: r.result, state: r.state });
+          }
+          this.refreshDbQueryOutput();
+          return { ok: true, resultText: formatVmValue(r.result), steps: r.steps };
+        } catch {
+          this.finvmWorkerFailed = true;
+          this.finvmWorker = null;
+          // fall through to the main-thread path
+        }
+      }
       const { userState, machineSnapshot, sourceSig: savedSig } = persistState
         ? splitNotebookFinvmState(this.finvmState)
         : { userState: {}, machineSnapshot: null, sourceSig: null };

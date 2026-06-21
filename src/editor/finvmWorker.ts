@@ -7,8 +7,18 @@
 // main thread's DB tab stays current without a per-tick full-state sync.
 import { evalNotebookCells, wrapVerdictLibForNotebook } from './notebookEval';
 import type { NotebookEvalContext } from './notebookEval';
-import { createEffectStorage, effectDbTablesToFinvmState } from './effectDriver';
+import {
+  createEffectStorage,
+  createFinvmHandlers,
+  effectDbTablesToFinvmState,
+  runProgramWithEffects,
+} from './effectDriver';
 import type { EffectStorage } from './effectDriver';
+import {
+  mergeNotebookFinvmState,
+  sourceSignature,
+  splitNotebookFinvmState,
+} from './finvmSnapshot';
 
 type EvalMsg = {
   type: 'eval';
@@ -19,7 +29,15 @@ type EvalMsg = {
 };
 type AbortMsg = { type: 'abort'; id: string };
 type StateMsg = { type: 'finvmState'; id: string };
-type InMsg = EvalMsg | AbortMsg | StateMsg;
+type RunProgramMsg = {
+  type: 'runProgram';
+  id: string;
+  programJson: string;
+  source: string;
+  entry: string;
+  persistState: boolean;
+};
+type InMsg = EvalMsg | AbortMsg | StateMsg | RunProgramMsg;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let vlib: any = null;
@@ -62,6 +80,53 @@ self.onmessage = async (e: MessageEvent<InMsg>) => {
   }
   if (msg.type === 'finvmState') {
     post({ type: 'finvmState', id: msg.id, state: finvmState });
+    return;
+  }
+  if (msg.type === 'runProgram') {
+    try {
+      await loadLibs();
+    } catch (err) {
+      post({ type: 'program', id: msg.id, ok: false, error: String(err) });
+      return;
+    }
+    const srcSig = sourceSignature(msg.source);
+    const split = msg.persistState
+      ? splitNotebookFinvmState(finvmState)
+      : { userState: {}, machineSnapshot: null, sourceSig: null };
+    const snapshot =
+      msg.persistState && split.machineSnapshot != null && split.sourceSig === srcSig
+        ? split.machineSnapshot
+        : undefined;
+    const vmOut = await runProgramWithEffects(finvm, msg.programJson, {
+      state: split.userState,
+      machineSnapshot: snapshot,
+      entryFunction: msg.entry,
+      handlers: createFinvmHandlers(storage),
+    });
+    if (!vmOut.ok) {
+      post({ type: 'program', id: msg.id, ok: false, error: vmOut.error });
+      return;
+    }
+    const dbState = effectDbTablesToFinvmState(storage.listDbTables());
+    finvmState = msg.persistState
+      ? mergeNotebookFinvmState({
+          userState: vmOut.state,
+          machineSnapshot: vmOut.snapshot,
+          sourceSig: srcSig,
+          dbState,
+        })
+      : { ...finvmState, '__finvm.db': dbState };
+    post({
+      type: 'program',
+      id: msg.id,
+      ok: true,
+      result: vmOut.result,
+      steps: vmOut.steps,
+      vmStatus: vmOut.vmStatus,
+      snapshot: vmOut.snapshot,
+      state: vmOut.state,
+      finvmState,
+    });
     return;
   }
   if (msg.type === 'eval') {
