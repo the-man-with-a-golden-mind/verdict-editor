@@ -532,6 +532,14 @@ export function mountNotebookImpl(selector) {
             const i = state.cells.findIndex((c) => c.id === id);
             if (i >= 0) deleteCellAt(i);
           },
+          renameCellById: (id, name) => {
+            const c = state.cells.find((c) => c.id === id);
+            if (!c) return;
+            updateNotebook({ tag: "setName", id, name: String(name ?? "").trim() });
+            persist(state, bridge);
+            schedulePublishPanel();
+            void patchCellDom(id);
+          },
           notebookCells: () =>
             state.cells.map((c) => ({
               id: c.id,

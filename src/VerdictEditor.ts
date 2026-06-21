@@ -591,7 +591,7 @@ class VerdictEditorElement extends HTMLElement {
     this.cellsPanel.className = 'flex flex-1 min-h-0 overflow-auto bg-[#0b0f1a] p-3';
     this.cellsNavHost = document.createElement('div');
     this.cellsNavHost.dataset.cellsNav = '1';
-    this.cellsNavHost.className = 'flex flex-col gap-1.5';
+    this.cellsNavHost.className = 'flex w-full flex-col gap-1.5';
     this.cellsNavHost.innerHTML =
       '<div class="text-xs italic text-slate-600">Per-cell navigation. Inputs and DB are shared across the notebook.</div>';
     this.cellsPanel.appendChild(this.cellsNavHost);
@@ -951,7 +951,7 @@ class VerdictEditorElement extends HTMLElement {
       const card = document.createElement('div');
       card.dataset.navCell = sec.cellId;
       card.className =
-        'flex items-center gap-2 rounded-lg border px-2.5 py-1.5 ' +
+        'flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 ' +
         (sec.focused ? 'border-indigo-400/60 bg-indigo-500/10' : 'border-slate-800/80 bg-slate-900/40');
       card.oncontextmenu = (e) => {
         e.preventDefault();
@@ -1035,6 +1035,10 @@ class VerdictEditorElement extends HTMLElement {
     };
     item('Run', false, () => void this.notebookApi?.runCellById?.(cellId));
     item('Focus', false, () => this.notebookApi?.focusCellById?.(cellId));
+    item('Rename…', false, () => {
+      const next = window.prompt('Cell name (shown in the Cells panel):', '');
+      if (next !== null) this.notebookApi?.renameCellById?.(cellId, next.trim());
+    });
     item(`Remove cell ${cellIndex + 1}`, true, () => this.notebookApi?.deleteCellById?.(cellId));
     document.body.appendChild(menu);
     const dismiss = (ev: MouseEvent) => {

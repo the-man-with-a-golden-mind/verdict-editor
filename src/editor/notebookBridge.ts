@@ -89,6 +89,7 @@ export type NotebookApi = {
   stopCellById?: (id: string) => void;
   focusCellById?: (id: string) => void;
   deleteCellById?: (id: string) => void;
+  renameCellById?: (id: string, name: string) => void;
   /** Cells for per-cell Visual tab rendering. */
   notebookCells?: () => NotebookCellInfo[];
 };
