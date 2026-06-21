@@ -936,10 +936,50 @@ class VerdictEditorElement extends HTMLElement {
     this.renderCellsNav(sections);
   }
 
-  /** Cells tab: navigation minimap — number, preview, run/stop, status. */
+  /** Cells tab: navigation minimap — number, name, run/stop, status. Rendered by
+   * the PureScript ps-spa component (Notebook.CellsNav); the imperative block
+   * below is a fallback if that mount isn't available. */
   private renderCellsNav(sections: CellsNavSection[]) {
     const host = this.cellsNavHost;
     if (!host) return;
+    const mount = (globalThis as Record<string, unknown>).__notebookMountCellsNav as
+      | ((h: HTMLElement, items: unknown[]) => void)
+      | undefined;
+    if (typeof mount === 'function') {
+      const items = sections.map((sec) => {
+        const label =
+          sec.kind === 'module' ? 'Module' : sec.kind === 'text' ? 'Text' : sec.kind === 'asset' ? 'Asset' : 'Runnable';
+        return {
+          cellId: sec.cellId,
+          meta: `${sec.cellIndex + 1} · ${label}`,
+          name: (sec.name ?? '').trim(),
+          isRunnable: sec.kind === 'code',
+          running: !!sec.running,
+          focused: !!sec.focused,
+          status: sec.running ? 'running' : sec.hasOutput ? 'ok' : 'idle',
+          onNav: () => {
+            if (this.activeMainTab === 'visual' && this.revealVisualCell(sec.cellId)) return;
+            this.notebookApi?.focusCellById?.(sec.cellId);
+          },
+          onRun: () => void this.notebookApi?.runCellById?.(sec.cellId),
+          onStop: () => this.notebookApi?.stopCellById?.(sec.cellId),
+        };
+      });
+      mount(host, items);
+      // ps-spa wires the click handlers; the right-click menu is attached here
+      // (re-attached each render since ps-spa replaces the DOM).
+      requestAnimationFrame(() => {
+        host.querySelectorAll<HTMLElement>('[data-nav-cell]').forEach((card) => {
+          const cellId = card.dataset.navCell ?? '';
+          const idx = sections.find((s) => s.cellId === cellId)?.cellIndex ?? 0;
+          card.oncontextmenu = (e) => {
+            e.preventDefault();
+            this.openCellNavMenu(e.clientX, e.clientY, cellId, idx);
+          };
+        });
+      });
+      return;
+    }
     host.innerHTML = '';
     if (sections.length === 0) {
       host.innerHTML = '<div class="text-xs italic text-slate-600">No cells yet.</div>';
