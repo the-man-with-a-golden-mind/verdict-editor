@@ -121,15 +121,23 @@ export function renderChartImpl(host) {
           }
         }
 
+        // Theme-aware palette: charts follow the IDE light/dark theme (class on
+        // <html>) so they don't stay dark on a light page.
+        const lightTheme =
+          typeof document !== "undefined" && document.documentElement.classList.contains("theme-light");
+        const T = lightTheme
+          ? { paper: "#ffffff", plot: "#f8fafc", font: "#0f172a", grid: "#e2e8f0", zero: "#cbd5e1", line: "#cbd5e1", tick: "#475569", spike: "#94a3b8", hover: "#f1f5f9", hoverBorder: "#cbd5e1" }
+          : { paper: "#0b0f1a", plot: "#0d1322", font: "#e2e8f0", grid: "#1e293b", zero: "#243049", line: "#243049", tick: "#94a3b8", spike: "#64748b", hover: "#0f172a", hoverBorder: "#334155" };
+
         const axisBase = {
-          gridcolor: "#1e293b",
-          zerolinecolor: "#243049",
-          linecolor: "#243049",
-          tickfont: { size: 10, color: "#94a3b8" },
+          gridcolor: T.grid,
+          zerolinecolor: T.zero,
+          linecolor: T.line,
+          tickfont: { size: 10, color: T.tick },
           showspikes: true,
           spikethickness: 1,
           spikedash: "dot",
-          spikecolor: "#64748b",
+          spikecolor: T.spike,
           spikemode: "across",
         };
 
@@ -144,17 +152,17 @@ export function renderChartImpl(host) {
           title: titleText
             ? {
                 text: titleText,
-                font: { size: compact ? 11 : 14, color: "#e2e8f0" },
+                font: { size: compact ? 11 : 14, color: T.font },
                 pad: { t: 8, b: 4 },
                 x: 0,
                 xanchor: "left",
               }
             : "",
-          paper_bgcolor: "#0b0f1a",
-          plot_bgcolor: "#0d1322",
-          font: { color: "#e2e8f0", family: "JetBrains Mono, monospace", size: 11 },
+          paper_bgcolor: T.paper,
+          plot_bgcolor: T.plot,
+          font: { color: T.font, family: "JetBrains Mono, monospace", size: 11 },
           hovermode: "x unified",
-          hoverlabel: { bgcolor: "#0f172a", bordercolor: "#334155", font: { size: 11 } },
+          hoverlabel: { bgcolor: T.hover, bordercolor: T.hoverBorder, font: { size: 11 } },
           dragmode: "pan",
           showlegend: traces.length > 1,
           legend: {

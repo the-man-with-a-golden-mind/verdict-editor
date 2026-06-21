@@ -293,6 +293,7 @@ class VerdictEditorElement extends HTMLElement {
   private finvmWorker: FinvmWorkerClient | null = null;
   private finvmWorkerFailed = false;
   private dbDebugPollTimer: number | null = null;
+  private themeToggleBtn: HTMLButtonElement | null = null;
   private languageAnalysisSig = '';
   private languageAnalysis = {
     diagnostics: [] as VerdictDiagnostic[],
@@ -377,6 +378,16 @@ class VerdictEditorElement extends HTMLElement {
       this.notebookBridgeRef?.setSourceMode(!this.notebookSourceMode);
     };
     mainTabBar.appendChild(this.sourceToggleBtn);
+
+    // Theme picker (light/dark) for the whole environment. Persisted; applied as
+    // a class on <html> so the CSS layer can retheme every surface.
+    this.themeToggleBtn = document.createElement('button');
+    this.themeToggleBtn.type = 'button';
+    this.themeToggleBtn.className =
+      'ml-1 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-300 hover:border-indigo-400/50 hover:text-white';
+    this.themeToggleBtn.onclick = () =>
+      this.setTheme(!document.documentElement.classList.contains('theme-light'));
+    mainTabBar.appendChild(this.themeToggleBtn);
 
     this.statusBar = document.createElement('div');
     this.statusBar.className = STATUS_BASE + ' text-slate-500';
@@ -723,6 +734,7 @@ class VerdictEditorElement extends HTMLElement {
     this.mainContainer.appendChild(rightPanel);
 
     this.appendChild(this.mainContainer);
+    this.initTheme();
 
     this.container.classList.add('verdict-cm-shell-wrap', 'min-h-0', 'flex-1');
 
@@ -2403,6 +2415,33 @@ class VerdictEditorElement extends HTMLElement {
       window.clearInterval(this.dbDebugPollTimer);
       this.dbDebugPollTimer = null;
     }
+  }
+
+  /** Apply the light/dark theme to the whole environment (a class on <html> that
+   * the CSS layer keys off), persist it, and re-render charts to match. */
+  private setTheme(light: boolean): void {
+    const root = document.documentElement;
+    root.classList.toggle('theme-light', light);
+    root.classList.toggle('theme-dark', !light);
+    if (this.themeToggleBtn) this.themeToggleBtn.textContent = light ? 'Dark' : 'Light';
+    try {
+      localStorage.setItem('verdict-theme', light ? 'light' : 'dark');
+    } catch {
+      /* ignore */
+    }
+    // Charts read theme colors at render time; nudge the visual tab to repaint.
+    this.vizDirty = true;
+    if (this.activeMainTab === 'visual') void this.refreshVisualization();
+  }
+
+  private initTheme(): void {
+    let light = false;
+    try {
+      light = localStorage.getItem('verdict-theme') === 'light';
+    } catch {
+      /* ignore */
+    }
+    this.setTheme(light);
   }
 
   /** Lazily create the FinVM worker; null (→ main-thread fallback) if it can't. */
