@@ -26,8 +26,6 @@ import {
   createNotebookBridge,
   loadNotebookDisplayRenderer,
   loadNotebookLib,
-  loadVnbFromStorage,
-  saveVnbToStorage,
   type CellsNavSection,
   type NotebookApi,
   type NotebookBridge,
@@ -39,9 +37,15 @@ import {
 } from './editor/notebookEval';
 import { bindingNamesInCell as resolveNotebookBindingNames } from './editor/notebookBindings';
 import { materializeIdeCellPlaceholders } from './editor/ideSession';
-import { DEFAULT_NOTEBOOK_DECISION_CELL_LINES } from './editor/defaultNotebookDecisionCell.mjs';
-import { DEFAULT_NOTEBOOK_SIM_CELL_LINES } from './editor/defaultNotebookSimCell.mjs';
-import defaultMarketSource from '../lib/verdict/Market.verdict?raw';
+import { blankNotebookDoc, type NotebookDoc } from './editor/notebookSeed';
+import {
+  rawConfigForElement,
+  resolveEditorConfig,
+  type EditorConfig,
+  type InputFieldSpec,
+  type ResolvedEditorConfig,
+} from './editor/editorConfig';
+import { financeConfig } from './editor/templates/finance';
 import { extractDocs, gasFromBytecode, renderCallGraph, type GasInfo } from './editor/vizGraph';
 import {
   collapsedDefKey,
@@ -61,34 +65,7 @@ declare global {
 // Shared monospace stack for every editor surface in the app.
 const FONT_MONO = "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
 
-/** Bump when default notebook cells change so stale localStorage is not reused. */
-const VNB_FORMAT_VERSION = 3;
-
-type NotebookSeedCell = {
-  source: string;
-  kind?: 'code' | 'wysiwyg';
-  role?: 'runnable' | 'module' | 'asset' | 'note';
-  path?: string;
-  moduleName?: string;
-};
-
-function notebookSeedFromCells(cells: Array<string | NotebookSeedCell>): string {
-  const normalized = cells.map((cell) => typeof cell === 'string' ? { source: cell } : cell);
-  const joined = normalized.map((c) => c.source.trim()).filter(Boolean).join('\n\n');
-  let h = 5381;
-  for (let i = 0; i < joined.length; i++) h = ((h << 5) + h + joined.charCodeAt(i)) | 0;
-  return JSON.stringify({
-    formatVersion: VNB_FORMAT_VERSION,
-    seedSig: `${joined.length}:${h >>> 0}`,
-    cells: normalized.map((cell) => ({
-      kind: cell.kind ?? 'code',
-      role: cell.role,
-      path: cell.path,
-      moduleName: cell.moduleName,
-      source: cell.source,
-    })),
-  });
-}
+// Notebook-seed helpers moved to ./editor/notebookSeed (shared with templates).
 
 // Base classes for the editor status bar; setStatus appends the state colour.
 const STATUS_BASE = 'flex h-7 shrink-0 items-center gap-1.5 px-4 text-xs font-mono bg-slate-950 border-t border-slate-800';
@@ -267,15 +244,13 @@ class VerdictEditorElement extends HTMLElement {
   private sourceToggleBtn: HTMLButtonElement | null = null;
   private resizeCleanup: (() => void) | null = null;
   private statusBar!: HTMLDivElement;
-  private symbolInput: HTMLInputElement | null = null;
-  private assetsCsvInput: HTMLInputElement | null = null;
-  private signalThresholdInput: HTMLInputElement | null = null;
-  private positionBiasInput: HTMLInputElement | null = null;
-  private loopIntervalInput: HTMLInputElement | null = null;
-  private historyCapInput: HTMLInputElement | null = null;
-  private curveCapInput: HTMLInputElement | null = null;
-  private telegramBotTokenInput: HTMLInputElement | null = null;
-  private telegramChatIdInput: HTMLInputElement | null = null;
+  /** Host config (set by a host before connect, or via the global registry). */
+  config?: EditorConfig;
+  private cfg!: ResolvedEditorConfig;
+  /** Notebook-wide input fields, keyed by spec.key (config-driven). */
+  private runtimeInputEls = new Map<string, HTMLInputElement>();
+  /** Document pre-loaded from the storage adapter before mount (null = use seed). */
+  private loadedDoc: NotebookDoc | null = null;
   private runToggleBtn: HTMLButtonElement | null = null;
   private liveIntervalInput: HTMLInputElement | null = null;
   // Live loop: when active, re-run every cell every `liveIntervalMs`. Each tick
@@ -334,6 +309,11 @@ class VerdictEditorElement extends HTMLElement {
   }
 
   private async build() {
+    // Resolve host config: explicit `.config` property or the global registry
+    // (data-config-id), falling back to the finance template so the standalone
+    // app keeps its demo notebook. Embedders pass their own config.
+    this.cfg = resolveEditorConfig(rawConfigForElement(this) ?? financeConfig());
+
     this.style.display = 'block';
     this.style.width = '100%';
     this.style.height = '100%';
@@ -625,77 +605,28 @@ class VerdictEditorElement extends HTMLElement {
       l.textContent = text;
       return l;
     };
-    this.symbolInput = document.createElement('input');
-    this.symbolInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
-    this.symbolInput.value = 'BTCUSD';
-    this.symbolInput.setAttribute('aria-label', 'Binance symbol');
-    this.symbolInput.oninput = () => this.onRuntimeInputsChanged();
-    this.assetsCsvInput = document.createElement('input');
-    this.assetsCsvInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
-    this.assetsCsvInput.value = 'BTCUSD,ETHUSD,ADAUSD';
-    this.assetsCsvInput.setAttribute('aria-label', 'Assets CSV');
-    this.assetsCsvInput.oninput = () => this.onRuntimeInputsChanged();
-    this.signalThresholdInput = document.createElement('input');
-    this.signalThresholdInput.type = 'number';
-    this.signalThresholdInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
-    this.signalThresholdInput.value = '2';
-    this.signalThresholdInput.setAttribute('aria-label', 'Signal threshold');
-    this.signalThresholdInput.oninput = () => this.onRuntimeInputsChanged();
-    this.positionBiasInput = document.createElement('input');
-    this.positionBiasInput.type = 'number';
-    this.positionBiasInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
-    this.positionBiasInput.value = '0';
-    this.positionBiasInput.setAttribute('aria-label', 'Position bias');
-    this.positionBiasInput.oninput = () => this.onRuntimeInputsChanged();
-    this.loopIntervalInput = document.createElement('input');
-    this.loopIntervalInput.type = 'number';
-    this.loopIntervalInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
-    this.loopIntervalInput.value = '5000';
-    this.loopIntervalInput.setAttribute('aria-label', 'Loop interval (ms)');
-    this.loopIntervalInput.oninput = () => this.onRuntimeInputsChanged();
-    this.historyCapInput = document.createElement('input');
-    this.historyCapInput.type = 'number';
-    this.historyCapInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
-    this.historyCapInput.value = '240';
-    this.historyCapInput.setAttribute('aria-label', 'History cap (points)');
-    this.historyCapInput.oninput = () => this.onRuntimeInputsChanged();
-    this.curveCapInput = document.createElement('input');
-    this.curveCapInput.type = 'number';
-    this.curveCapInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
-    this.curveCapInput.value = '0';
-    this.curveCapInput.setAttribute('aria-label', 'Equity-curve cap (0 = unbounded)');
-    this.curveCapInput.title = 'Backtest curve length: 0 keeps the full history (unbounded); N keeps the last N bars.';
-    this.curveCapInput.oninput = () => this.onRuntimeInputsChanged();
-    this.telegramBotTokenInput = document.createElement('input');
-    this.telegramBotTokenInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
-    this.telegramBotTokenInput.value = '';
-    this.telegramBotTokenInput.placeholder = '123456:ABC...';
-    this.telegramBotTokenInput.setAttribute('aria-label', 'Telegram bot token');
-    this.telegramBotTokenInput.oninput = () => this.onRuntimeInputsChanged();
-    this.telegramChatIdInput = document.createElement('input');
-    this.telegramChatIdInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
-    this.telegramChatIdInput.value = '';
-    this.telegramChatIdInput.placeholder = '-100123456789';
-    this.telegramChatIdInput.setAttribute('aria-label', 'Telegram chat id');
-    this.telegramChatIdInput.oninput = () => this.onRuntimeInputsChanged();
-    fixedInputs.appendChild(mkLabel('symbol'));
-    fixedInputs.appendChild(this.symbolInput);
-    fixedInputs.appendChild(mkLabel('assetsCsv'));
-    fixedInputs.appendChild(this.assetsCsvInput);
-    fixedInputs.appendChild(mkLabel('signalThreshold'));
-    fixedInputs.appendChild(this.signalThresholdInput);
-    fixedInputs.appendChild(mkLabel('positionBias'));
-    fixedInputs.appendChild(this.positionBiasInput);
-    fixedInputs.appendChild(mkLabel('loopIntervalMs'));
-    fixedInputs.appendChild(this.loopIntervalInput);
-    fixedInputs.appendChild(mkLabel('historyCap'));
-    fixedInputs.appendChild(this.historyCapInput);
-    fixedInputs.appendChild(mkLabel('curveCap'));
-    fixedInputs.appendChild(this.curveCapInput);
-    fixedInputs.appendChild(mkLabel('telegramBotToken'));
-    fixedInputs.appendChild(this.telegramBotTokenInput);
-    fixedInputs.appendChild(mkLabel('telegramChatId'));
-    fixedInputs.appendChild(this.telegramChatIdInput);
+    // Config-driven notebook-wide inputs. Each spec becomes a labelled field;
+    // the finance template supplies the original 9, but a host can pass any set.
+    this.runtimeInputEls.clear();
+    for (const spec of this.cfg.inputs) {
+      const input = document.createElement('input');
+      if (spec.type === 'number') input.type = 'number';
+      input.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
+      input.value = spec.default != null ? String(spec.default) : '';
+      if (spec.placeholder) input.placeholder = spec.placeholder;
+      if (spec.title) input.title = spec.title;
+      input.setAttribute('aria-label', spec.label ?? spec.key);
+      input.oninput = () => this.onRuntimeInputsChanged();
+      this.runtimeInputEls.set(spec.key, input);
+      fixedInputs.appendChild(mkLabel(spec.label ?? spec.key));
+      fixedInputs.appendChild(input);
+    }
+    if (this.cfg.inputs.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'col-span-2 text-[11px] italic text-slate-600';
+      empty.textContent = 'No fixed inputs configured. Add custom inputs below.';
+      fixedInputs.appendChild(empty);
+    }
 
     const dynamicInputs = document.createElement('div');
     dynamicInputs.className = 'rounded border border-slate-800 bg-slate-950 p-2';
@@ -755,35 +686,15 @@ class VerdictEditorElement extends HTMLElement {
       fontSize: 12,
     });
 
-    const DEFAULT_NOTEBOOK_CELL_2 = DEFAULT_NOTEBOOK_SIM_CELL_LINES;
-    const defaultNotebookCells = [
-      {
-        source: defaultMarketSource.trim(),
-        kind: 'code' as const,
-        role: 'module' as const,
-        path: 'Market.verdict',
-        moduleName: 'Market',
-      },
-      {
-        source: DEFAULT_NOTEBOOK_DECISION_CELL_LINES.join('\n'),
-        kind: 'code' as const,
-        role: 'runnable' as const,
-        path: 'Main.verdict',
-        moduleName: 'Main',
-      },
-      {
-        source: DEFAULT_NOTEBOOK_CELL_2.join('\n'),
-        kind: 'code' as const,
-        role: 'runnable' as const,
-        path: 'Backtest.verdict',
-        moduleName: 'Backtest',
-      },
-    ];
-    this.defaultNotebookSeed = notebookSeedFromCells(defaultNotebookCells);
+    // The cold-start document comes from config (finance template by default,
+    // a host-supplied doc when embedded, or a blank doc for a generic editor).
+    const defaultDoc = this.cfg.defaultDocument ?? blankNotebookDoc();
+    this.defaultNotebookSeed = JSON.stringify(defaultDoc);
+    const defaultProgramSource = defaultDoc.cells.map((cell) => cell.source.trim()).join('\n\n');
 
     this.editor = createVerdictEditor(this.container, {
       variant: 'program',
-      value: defaultNotebookCells.map((cell) => cell.source).join('\n\n'),
+      value: defaultProgramSource,
       languageService: this.programLanguageService(),
       onRun: () => this.run(),
       onChange: () => this.scheduleUpdate(),
@@ -836,6 +747,14 @@ class VerdictEditorElement extends HTMLElement {
     if (this.isDebugView() || !this.notebookHost) return;
     try {
       await loadAstLib();
+      // Load the host's saved document for this notebook id (async) before mount;
+      // the bridge then serves it synchronously and the default seed is the fallback.
+      this.loadedDoc = await this.cfg.storage
+        .load(this.cfg.notebookId)
+        .catch((e) => {
+          console.error('Notebook load failed:', e);
+          return null;
+        });
       this.renderNotebookDisplay = await loadNotebookDisplayRenderer();
       const bridge = createNotebookBridge({
         vlib,
@@ -847,7 +766,11 @@ class VerdictEditorElement extends HTMLElement {
           // Run the (CPU-bound) cell eval on a worker so heavy actor ticks don't
           // freeze the UI. Materialize on the main thread first (DOM inputs + cell
           // placeholders); the worker treats the source as final.
-          const worker = this.ensureFinvmWorker();
+          // A host-provided effect backend lives on the main thread, so a
+          // custom config bypasses the worker and runs the main-thread path
+          // (which can read/write the configured EffectStorage). 'sandbox' (the
+          // default) keeps the in-memory worker.
+          const worker = this.cfg.effects.kind === 'sandbox' ? this.ensureFinvmWorker() : null;
           if (worker) {
             const matSrc = materializeIdeCellPlaceholders(
               this.materializeInputs(source),
@@ -879,7 +802,10 @@ class VerdictEditorElement extends HTMLElement {
               setFinvmState: (s) => {
                 this.finvmState = s;
               },
-              getEffectStorage: () => this.effectStorage ?? createEffectStorage(),
+              getEffectStorage: () =>
+                (this.cfg.effects.kind === 'custom' ? this.cfg.effects.storage : undefined) ??
+                this.effectStorage ??
+                createEffectStorage(),
               setEffectStorage: (s) => {
                 this.effectStorage = s;
               },
@@ -927,8 +853,12 @@ class VerdictEditorElement extends HTMLElement {
           }));
           return mapDiagnosticsToCells(diags, refs);
         },
-        loadDocument: () => loadVnbFromStorage(),
-        saveDocument: (doc) => saveVnbToStorage(doc),
+        loadDocument: () => this.loadedDoc,
+        saveDocument: (doc) => {
+          void this.cfg.storage
+            .save(this.cfg.notebookId, doc)
+            .catch((e) => console.error('Notebook save failed:', e));
+        },
         bindingNamesInCell: (cellId, cells, source) =>
           resolveNotebookBindingNames(
             cellId,
@@ -2448,6 +2378,11 @@ class VerdictEditorElement extends HTMLElement {
   }
 
   private initTheme(): void {
+    // Host config wins; otherwise the persisted user choice; otherwise dark.
+    if (this.cfg?.theme) {
+      this.setTheme(this.cfg.theme === 'light');
+      return;
+    }
     let light = false;
     try {
       light = localStorage.getItem('verdict-theme') === 'light';
@@ -2567,17 +2502,12 @@ class VerdictEditorElement extends HTMLElement {
   }
 
   private readRuntimeInputs(): Record<string, unknown> {
-    const out: Record<string, unknown> = {
-      symbol: this.currentSymbol(),
-      assetsCsv: this.assetsCsvInput?.value ?? 'BTCUSD,ETHUSD,ADAUSD',
-      signalThreshold: Number(this.signalThresholdInput?.value ?? '2'),
-      positionBias: Number(this.positionBiasInput?.value ?? '0'),
-      loopIntervalMs: Number(this.loopIntervalInput?.value ?? '5000'),
-      historyCap: Number(this.historyCapInput?.value ?? '240'),
-      curveCap: Number(this.curveCapInput?.value ?? '0'),
-      telegramBotToken: this.telegramBotTokenInput?.value ?? '',
-      telegramChatId: this.telegramChatIdInput?.value ?? '',
-    };
+    const out: Record<string, unknown> = {};
+    // Config-driven fixed inputs (number specs coerce to Number).
+    const specByKey = new Map(this.cfg.inputs.map((s) => [s.key, s]));
+    for (const [key, el] of this.runtimeInputEls) {
+      out[key] = specByKey.get(key)?.type === 'number' ? Number(el.value) : el.value;
+    }
     if (this.inputsList) {
       const rows = this.inputsList.querySelectorAll<HTMLDivElement>('[data-input-row]');
       rows.forEach((row) => {
@@ -2649,7 +2579,7 @@ class VerdictEditorElement extends HTMLElement {
   }
 
   private currentSymbol(): string {
-    const raw = (this.symbolInput?.value ?? 'BTCUSD').trim().toUpperCase();
+    const raw = (this.runtimeInputEls.get('symbol')?.value ?? 'BTCUSD').trim().toUpperCase();
     return raw === '' ? 'BTCUSD' : raw;
   }
 
@@ -2688,3 +2618,34 @@ interface FinVmModule {
 
 customElements.define('verdict-editor', VerdictEditorElement);
 customElements.define('verdict-editor-debug', VerdictEditorDebugElement);
+
+/**
+ * Programmatic embedding entry point. Creates a `<verdict-editor>` with the
+ * given host config and appends it to `host`. The element reads its config in
+ * connectedCallback, so this sets `.config` before appending.
+ */
+export function mountVerdictEditor(
+  host: HTMLElement,
+  config?: EditorConfig,
+): HTMLElement & { config?: EditorConfig } {
+  const el = document.createElement('verdict-editor') as HTMLElement & { config?: EditorConfig };
+  if (config) el.config = config;
+  host.appendChild(el);
+  return el;
+}
+
+// Re-exports so embedders import everything from the editor entry module.
+export type {
+  EditorConfig,
+  StorageAdapter,
+  EffectBackendConfig,
+  InputFieldSpec,
+  NotebookDoc,
+} from './editor/editorConfig';
+export { localStorageAdapter } from './editor/editorConfig';
+export {
+  namespacedLocalStorageAdapter,
+  inMemoryAdapter,
+  restAdapter,
+} from './editor/storageAdapters';
+export { financeConfig } from './editor/templates/finance';
