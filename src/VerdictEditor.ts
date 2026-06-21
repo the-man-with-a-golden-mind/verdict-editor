@@ -12,6 +12,7 @@ import {
   runProgramWithEffects,
   type EffectStorage,
 } from './editor/effectDriver';
+import { FinvmWorkerClient } from './editor/finvmClient';
 import {
   escapeHtml,
   extractDbTables,
@@ -289,6 +290,8 @@ class VerdictEditorElement extends HTMLElement {
   private busyCount = 0;
   private finvmState: Record<string, unknown> = {};
   private effectStorage: EffectStorage | null = null;
+  private finvmWorker: FinvmWorkerClient | null = null;
+  private finvmWorkerFailed = false;
   private languageAnalysisSig = '';
   private languageAnalysis = {
     diagnostics: [] as VerdictDiagnostic[],
@@ -818,6 +821,33 @@ class VerdictEditorElement extends HTMLElement {
         syncCellsNav: (sections) => this.syncNotebookCellsNav(sections),
         evalCells: async (source, names, opts) => {
           if (!vlib || !finvmLib) return [];
+          // Run the (CPU-bound) cell eval on a worker so heavy actor ticks don't
+          // freeze the UI. Materialize on the main thread first (DOM inputs + cell
+          // placeholders); the worker treats the source as final.
+          const worker = this.ensureFinvmWorker();
+          if (worker) {
+            const matSrc = materializeIdeCellPlaceholders(
+              this.materializeInputs(source),
+              { id: opts?.cellId, index: opts?.cellIndex },
+              this.finvmState,
+            );
+            try {
+              const { outputs, dbTables } = await worker.evalCells(matSrc, names, opts);
+              // Keep the DB tab's source current from the worker's snapshot; fetch
+              // the full VM snapshot only when the Debug tab is actually open.
+              if (dbTables) this.finvmState = { ...this.finvmState, '__finvm.db': dbTables };
+              if (this.activeMainTab === 'db') this.refreshDbQueryOutput();
+              if (this.activeMainTab === 'debug') {
+                this.finvmState = await worker.getFinvmState();
+                this.renderVmState(this.finvmState);
+              }
+              return outputs;
+            } catch {
+              this.finvmWorkerFailed = true;
+              this.finvmWorker = null;
+              // fall through to the main-thread path
+            }
+          }
           const outs = await evalNotebookCells(
             {
               vlib,
@@ -2252,6 +2282,19 @@ class VerdictEditorElement extends HTMLElement {
     wrapper.appendChild(sigNote);
 
     return wrapper;
+  }
+
+  /** Lazily create the FinVM worker; null (→ main-thread fallback) if it can't. */
+  private ensureFinvmWorker(): FinvmWorkerClient | null {
+    if (this.finvmWorker) return this.finvmWorker;
+    if (this.finvmWorkerFailed) return null;
+    try {
+      this.finvmWorker = new FinvmWorkerClient();
+      return this.finvmWorker;
+    } catch {
+      this.finvmWorkerFailed = true;
+      return null;
+    }
   }
 
   private async runFinvmProgram(programJson: string, persistState: boolean): Promise<{ ok: true; resultText: string; steps: number } | { ok: false; error: string }> {
