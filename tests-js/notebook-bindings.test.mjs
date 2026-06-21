@@ -135,14 +135,14 @@ function materializeDefaultInputs(source) {
   return code.replace(/__INPUT_[A-Za-z0-9_]+__/g, "0");
 }
 
-test("bindings: default example program parses and exposes main + simReport", async () => {
+test("bindings: default example program parses and exposes main + simulate", async () => {
   const v = await import(pathToFileURL(path.join(root, "public/lib/verdict-notebook.mjs")).href);
   const raw = defaultExampleProgramFromEditor();
   const src = materializeDefaultInputs(raw);
   const errs = v.diagnosticsJS(src).filter((d) => d.severity !== "warning");
   assert.equal(errs.length, 0, errs.map((e) => `L${e.line}: ${e.message}`).join("; "));
-  assert.deepEqual(v.nullaryBindingsJS(src).sort(), ["main", "simReport"]);
-  for (const name of ["main", "simReport"]) {
+  assert.deepEqual(v.nullaryBindingsJS(src).sort(), ["main", "simulate"]);
+  for (const name of ["main", "simulate"]) {
     const c = v.compileBindingEntryJS(src, name);
     assert.equal(c.ok, true, c.error ?? name);
   }

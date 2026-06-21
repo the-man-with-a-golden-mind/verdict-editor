@@ -43,7 +43,7 @@ const libraryLinkHelpers = [
   "  return /\\b(spawnCounter|counterAdd|counterGet|spawnRegistry|registryPut|registryGetPid)\\b/.test(src);",
   "};",
   "var usesIdeLibrary = function(src) {",
-  "  return /\\b(ensureGlobal|bootGlobal|registerWorker|ask\\b|idePut|ideGet)\\b/.test(src);",
+  "  return /\\b(ensureGlobal|bootGlobal|registerWorker|ask\\b|idePut|ideGet|renderEvery|emit)\\b/.test(src);",
   "};",
   "var usesCellBusLibrary = function(src) {",
   "  return /\\b(busPost|busRead|busQueue|busPending|busTakeFirst)\\b/.test(src);",

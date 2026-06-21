@@ -142,6 +142,9 @@ export function mountNotebookImpl(selector) {
           // after. Loops are PER CELL and independent; Stop clears them.
           cellLoops: new Set(),
           loopTimers: {},
+          // Latest Display value a cell emitted live (actor → output). Rendered
+          // immediately on emit and re-rendered when the cell's output redraws.
+          liveEmit: {},
           runControllers: {},
           executionCounts: {},
           executionSeq: 0,
@@ -309,11 +312,30 @@ export function mountNotebookImpl(selector) {
             throw new Error(chk.error ?? "Compile failed");
           }
           if (cellNames.length === 0) return [];
+          // Live output: an actor cell emits Display values via the __display__
+          // channel; render each to this cell's output the moment it arrives,
+          // instead of waiting for the (endless) eval to return.
+          const onEmit = (_id, value) => {
+            state.liveEmit[cell.id] = value;
+            renderEmitToCell(cell.id, value);
+          };
           // Each cell is its own runtime entity: run only this cell's bindings.
           // Cross-cell state lives in the shared FinVM snapshot + IDE actor/cache layer.
           return await Promise.resolve(
-            bridge.evalCells?.(src, cellNames, { signal, cellId: cell.id, cellIndex: cellIdx }) ?? [],
+            bridge.evalCells?.(src, cellNames, { signal, cellId: cell.id, cellIndex: cellIdx, onEmit }) ?? [],
           );
+        }
+
+        function renderEmitToCell(cellId, value) {
+          const host = stack.querySelector(`[data-cell-output="${cellId}"]`);
+          if (!host) {
+            // Output area not in the DOM yet — re-render the cell so it appears;
+            // fillOutputHost then paints the stored liveEmit value.
+            void patchCellDom(cellId);
+            return;
+          }
+          host.innerHTML = "";
+          void renderDisplayInto(host, value, bridge);
         }
 
         function concatenate() {
@@ -1058,6 +1080,11 @@ export function mountNotebookImpl(selector) {
 
         async function fillOutputHost(hostEl, cell, idx) {
           hostEl.innerHTML = "";
+          // Actor cells render whatever they last emitted on the live channel.
+          if (state.liveEmit[cell.id] !== undefined) {
+            await renderDisplayInto(hostEl, state.liveEmit[cell.id], bridge);
+            return true;
+          }
           const names = outputKeysForCell(cell);
           let hasContent = false;
           for (const n of names) {

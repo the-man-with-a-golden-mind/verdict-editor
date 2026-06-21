@@ -270,6 +270,7 @@ async function runBindingOnFinvm(
   effectStorage: EffectStorage,
   sourceSig: string,
   signal?: AbortSignal,
+  onEmit?: (value: unknown) => void,
 ): Promise<{ ok: true; result: unknown; finvmState: Record<string, unknown> } | { ok: false; error: string }> {
   try {
     const program = JSON.parse(programJson) as {
@@ -288,7 +289,7 @@ async function runBindingOnFinvm(
       state: userState,
       machineSnapshot: snapshot,
       entryFunction: bindingName,
-      handlers: createFinvmHandlers(effectStorage, undefined, signal),
+      handlers: createFinvmHandlers(effectStorage, undefined, signal, onEmit),
     });
     if (!vmOut.ok) return { ok: false, error: vmOut.error };
     const dbState = effectDbTablesToFinvmState(effectStorage.listDbTables());
@@ -312,6 +313,8 @@ export type NotebookEvalContext = {
   getEffectStorage: () => EffectStorage;
   setEffectStorage: (s: EffectStorage) => void;
   materialize: (source: string, cell?: { id?: string; index?: number }) => string;
+  /** Render a Display value emitted live by a running cell to its output. */
+  onEmit?: (cellId: string | undefined, value: unknown) => void;
 };
 
 export type NotebookEvalOptions = {
@@ -391,6 +394,7 @@ export async function evalNotebookCells(
       storage,
       srcSig,
       opts?.signal,
+      ctx.onEmit ? (value) => ctx.onEmit!(opts?.cell?.id, value) : undefined,
     );
     if (!run.ok) {
       outputs.push({ name, ok: false, typeSig: sigOf(name), error: run.error });

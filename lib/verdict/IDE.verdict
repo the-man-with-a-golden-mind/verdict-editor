@@ -1,4 +1,4 @@
-module IDE exposing (idePut, ideGet, registerWorker, ask, ensureGlobal, bootGlobal)
+module IDE exposing (idePut, ideGet, registerWorker, ask, ensureGlobal, bootGlobal, emit, renderEvery)
 
 type IdeMsg = MkIdeRegister({ sourceCell : String, role : String, pid : Pid, reply : Pid }) | MkIdeRoute({ role : String, payload : Json, reply : Pid })
 
@@ -58,3 +58,22 @@ ask ref role payload =
   let me = self() in
   let _ = actorSend(ref, MkIdeRoute({ role = role, payload = payload, reply = me })) in
   recv()
+
+-- Live output channel. A cell's process (an actor) sends a Display value to its
+-- own output by writing it on the reserved `__display__` channel; the IDE host
+-- renders it immediately, so output updates as the actor runs instead of only
+-- on the eval's return value.
+emit : Json -> Unit
+emit value =
+  let _ = cacheSet("__display__", "out", value) in
+  unit
+
+-- The render-loop actor: every `ms`, run `step`, send its Display result to this
+-- cell's output, then continue itself. Runs forever until Stop. This is the
+-- "endless actor" — it messages its output each tick and re-schedules itself,
+-- with the cadence declared in the cell (not the environment).
+renderEvery : Int -> (Unit -> Json) -> Unit
+renderEvery ms step =
+  let _ = emit(step(unit)) in
+  let _ = builtin("time.sleep@1", ms) in
+  renderEvery(ms, step)

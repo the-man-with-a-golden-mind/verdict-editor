@@ -1,8 +1,9 @@
 /** Default notebook cell 2 (backtest + simReport display). */
 export const DEFAULT_NOTEBOOK_SIM_CELL_LINES = [
-  'module Backtest exposing (simReport)',
+  'module Backtest exposing (simulate)',
   'import Market exposing (..)',
-  'import Loop exposing (..)',
+  'import Display exposing (..)',
+  'import IDE exposing (..)',
   '',
   '-- Simulator cell: back-tests the rolling price history the producer cell',
   '-- maintains in the shared market cache, then renders Plotly charts (Display',
@@ -82,7 +83,9 @@ export const DEFAULT_NOTEBOOK_SIM_CELL_LINES = [
   'buildReport : Unit -> Json',
   'buildReport _ = dStack(foldl(reportAcc, [], split(__INPUT_assetsCsv__, ",")))',
   '',
-  '-- Endless loop: rebuild the report, then sleep 5s. Stop ends it.',
-  'simReport : Json',
-  'simReport = loopEvery(__INPUT_loopIntervalMs__, buildReport)',
+  '-- This cell is an endless actor: every loop-interval it rebuilds the backtest',
+  '-- report and sends it to its own output (IDE.renderEvery → emit), then',
+  '-- continues itself. Press Stop to end it.',
+  'simulate : Unit',
+  'simulate = renderEvery(__INPUT_loopIntervalMs__, buildReport)',
 ];

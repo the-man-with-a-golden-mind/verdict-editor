@@ -35,6 +35,8 @@ export type NotebookEvalCellOpts = {
   signal?: AbortSignal;
   cellId?: string;
   cellIndex?: number;
+  /** Live output: called when the running cell emits a Display value to render now. */
+  onEmit?: (cellId: string | undefined, value: unknown) => void;
 };
 
 export type NotebookBridge = {

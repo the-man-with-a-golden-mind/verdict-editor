@@ -189,6 +189,10 @@ export function createFinvmHandlers(
   storage: EffectStorage,
   fetchImpl: typeof fetch = globalThis.fetch.bind(globalThis),
   signal?: AbortSignal,
+  // Live output channel: a cell (actor) emits a Display value by writing to the
+  // reserved `__display__` cache namespace; the host renders it to the running
+  // cell's output immediately instead of waiting for the eval's return value.
+  onEmit?: (value: unknown) => void,
 ) {
   return {
     // Real `time.sleep@1` effect (EFFECT_AWAIT). A cell's `sleep`/`loopEvery`
@@ -251,8 +255,14 @@ export function createFinvmHandlers(
       return storage.dbDelete(String(p.table ?? ''), String(p.id ?? ''));
     },
     'cache.set': async (p: { ns?: string; cacheKey?: string; key2?: string; value?: unknown }) => {
+      const ns = String(p.ns ?? '');
+      // Reserved emit channel: render to the running cell's output, don't store.
+      if (ns === '__display__') {
+        onEmit?.(p.value ?? null);
+        return true;
+      }
       const key = String(p.cacheKey ?? p.key2 ?? '');
-      return storage.cacheSet(String(p.ns ?? ''), key, p.value ?? null);
+      return storage.cacheSet(ns, key, p.value ?? null);
     },
     'cache.get': async (p: { ns?: string; cacheKey?: string; key2?: string }) => {
       const key = String(p.cacheKey ?? p.key2 ?? '');

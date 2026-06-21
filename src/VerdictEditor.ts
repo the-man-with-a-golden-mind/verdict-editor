@@ -832,6 +832,7 @@ class VerdictEditorElement extends HTMLElement {
               },
               materialize: (s, cell) =>
                 materializeIdeCellPlaceholders(this.materializeInputs(s), cell, this.finvmState),
+              onEmit: (cellId, value) => opts?.onEmit?.(cellId, value),
             },
             source,
             names,
