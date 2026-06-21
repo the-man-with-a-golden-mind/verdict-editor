@@ -10,22 +10,68 @@ import {
   placeholder,
 } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
-import { bracketMatching } from "@codemirror/language";
+import { bracketMatching, syntaxHighlighting } from "@codemirror/language";
 import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
 import { forceLinting } from "@codemirror/lint";
 import {
   VERDICT_COLORS,
-  verdictSyntaxExtensions,
-  bytecodeSyntaxExtensions,
+  VERDICT_COLORS_LIGHT,
+  verdictLanguage,
+  bytecodeLanguage,
+  verdictHighlightStyle,
+  verdictHighlightStyleLight,
+  bytecodeHighlightStyle,
+  bytecodeHighlightStyleLight,
 } from "./VerdictSyntax.js";
 import { verdictLanguageExtensions, languageRefreshEffect } from "./VerdictLanguageService.js";
 
 const editableCompartment = new Compartment();
 const FONT_MONO = "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
 
-function buildTheme(variant, opts = {}) {
+// Theme + syntax-highlight live in compartments so the whole-environment
+// light/dark toggle can re-skin every open editor (shell + notebook cells)
+// without rebuilding them — driven by a `verdict-theme-change` window event.
+const themeCompartment = new Compartment();
+const highlightCompartment = new Compartment();
+const liveEditors = new Set();
+let themeListenerBound = false;
+
+function currentLight() {
+  return typeof document !== "undefined" && document.documentElement.classList.contains("theme-light");
+}
+
+function verdictHighlightFor(light) {
+  return syntaxHighlighting(light ? verdictHighlightStyleLight : verdictHighlightStyle);
+}
+
+function bytecodeHighlightFor(light) {
+  return syntaxHighlighting(light ? bytecodeHighlightStyleLight : bytecodeHighlightStyle);
+}
+
+function highlightFor(variant, light) {
+  return variant === "bytecode" ? bytecodeHighlightFor(light) : verdictHighlightFor(light);
+}
+
+function bindThemeListener() {
+  if (themeListenerBound || typeof window === "undefined") return;
+  themeListenerBound = true;
+  window.addEventListener("verdict-theme-change", (e) => {
+    const light = !!(e && e.detail && e.detail.light);
+    for (const entry of liveEditors) {
+      entry.view.dispatch({
+        effects: [
+          themeCompartment.reconfigure(buildTheme(entry.variant, entry.opts, light)),
+          highlightCompartment.reconfigure(highlightFor(entry.variant, light)),
+        ],
+      });
+    }
+  });
+}
+
+function buildTheme(variant, opts = {}, light = false) {
   const fontSize = opts.fontSize ?? (variant === "program" ? 14 : 12);
   const lineHeight = opts.lineHeight ?? (variant === "program" ? 1.55 : 1.35);
+  const C = light ? VERDICT_COLORS_LIGHT : VERDICT_COLORS;
 
   return EditorView.theme(
     {
@@ -33,8 +79,8 @@ function buildTheme(variant, opts = {}) {
         height: "100%",
         maxHeight: variant === "cell" ? "100%" : undefined,
         overflow: variant === "cell" ? "hidden" : undefined,
-        backgroundColor: VERDICT_COLORS.background,
-        color: VERDICT_COLORS.foreground,
+        backgroundColor: C.background,
+        color: C.foreground,
         fontSize: `${fontSize}px`,
         fontFamily: FONT_MONO,
       },
@@ -44,7 +90,7 @@ function buildTheme(variant, opts = {}) {
         ...(variant === "cell" ? { height: "100%", maxHeight: "100%" } : {}),
       },
       ".cm-content": {
-        caretColor: VERDICT_COLORS.cursor,
+        caretColor: C.cursor,
         padding: variant === "program" ? "18px 0" : "8px 0",
       },
       ".cm-line": {
@@ -53,21 +99,21 @@ function buildTheme(variant, opts = {}) {
         ...(variant === "cell" ? { whiteSpace: "pre" } : {}),
       },
       ".cm-gutters": {
-        backgroundColor: VERDICT_COLORS.background,
-        color: VERDICT_COLORS.lineNumber,
+        backgroundColor: C.background,
+        color: C.lineNumber,
         border: "none",
       },
       ".cm-activeLineGutter": {
-        color: VERDICT_COLORS.lineNumberActive,
+        color: C.lineNumberActive,
       },
-      ".cm-activeLine": { backgroundColor: VERDICT_COLORS.lineHighlight },
-      ".cm-cursor, .cm-dropCursor": { borderLeftColor: VERDICT_COLORS.cursor },
+      ".cm-activeLine": { backgroundColor: C.lineHighlight },
+      ".cm-cursor, .cm-dropCursor": { borderLeftColor: C.cursor },
       "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": {
-        backgroundColor: `${VERDICT_COLORS.selection} !important`,
+        backgroundColor: `${C.selection} !important`,
       },
       "&.cm-editor.cm-readonly .cm-cursor": { display: "none" },
     },
-    { dark: true },
+    { dark: !light },
   );
 }
 
@@ -91,6 +137,7 @@ export function createVerdictEditor(host, opts = {}) {
   const onChange = opts.onChange ?? (() => {});
   const onFocus = opts.onFocus ?? (() => {});
   const editable = opts.editable !== false && variant !== "bytecode";
+  const light = currentLight();
 
   const updateListener = EditorView.updateListener.of((update) => {
     if (update.docChanged) onChange(update.state.doc.toString());
@@ -106,7 +153,7 @@ export function createVerdictEditor(host, opts = {}) {
   const extensions = [
     drawSelection(),
     history(),
-    buildTheme(variant, opts),
+    themeCompartment.of(buildTheme(variant, opts, light)),
     keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
     updateListener,
     focusListener,
@@ -118,13 +165,14 @@ export function createVerdictEditor(host, opts = {}) {
   }
 
   if (variant === "bytecode") {
-    extensions.push(...bytecodeSyntaxExtensions);
+    extensions.push(bytecodeLanguage, highlightCompartment.of(bytecodeHighlightFor(light)));
   } else {
     extensions.push(
       lineNumbers(),
       highlightActiveLine(),
       bracketMatching(),
-      ...verdictSyntaxExtensions,
+      verdictLanguage,
+      highlightCompartment.of(verdictHighlightFor(light)),
     );
     if (variant === "program") {
       extensions.push(highlightSelectionMatches(), keymap.of(searchKeymap));
@@ -161,9 +209,14 @@ export function createVerdictEditor(host, opts = {}) {
     parent: host,
   });
 
+  const entry = { view, variant, opts };
+  liveEditors.add(entry);
+  bindThemeListener();
+
   return {
     view,
     destroy() {
+      liveEditors.delete(entry);
       view.destroy();
     },
     getValue() {

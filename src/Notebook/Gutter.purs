@@ -87,39 +87,42 @@ statusDot props =
     ]
     [ H.text "●" ]
 
--- | Both Run and Stop are always visible (not a single toggle). Stop is dimmed
--- | when the cell is neither running nor looping; Run dims while running so a
--- | loop cell shows its active state without hiding the affordance.
+-- | A single Run/Stop toggle in one fixed slot: Run (▶) when idle, Stop (■)
+-- | while the cell runs (an actor loops until stopped). You can't stop a cell
+-- | that isn't running, so the two never coexist — Run becomes Stop in place.
+-- | The glyph is theme-neutral (`text-slate-200` → near-black in light mode via
+-- | the CSS override, light in dark) so the icon reads black in light per
+-- | request; the border/fill stays emerald (run) / rose (stop) to signal which.
 runBtns :: GutterProps -> Array (H.Html (Effect Unit))
 runBtns props =
   let
     base =
-      "notebook-gutter-btn flex h-8 w-8 shrink-0 items-center justify-center rounded border text-[14px] leading-none shadow-sm transition-colors "
-    runActive = "border-emerald-500/50 bg-emerald-500/20 text-emerald-300 hover:border-emerald-400 hover:bg-emerald-500/35 hover:text-emerald-100"
-    runDim = "border-slate-700/70 bg-slate-900/70 text-emerald-300/50 hover:border-emerald-400 hover:text-emerald-200"
-    stopActive = "border-rose-500/60 bg-rose-500/25 text-rose-200 hover:border-rose-400 hover:bg-rose-500/40"
-    stopDim = "border-slate-700/70 bg-slate-900/70 text-rose-300/40"
-    runCls = if props.isRunning then runDim else runActive
-    stopCls = if props.isRunning then stopActive else stopDim
+      "notebook-gutter-btn flex h-8 w-8 shrink-0 items-center justify-center rounded border text-[14px] leading-none text-slate-200 shadow-sm transition-colors "
+    runCls = "border-emerald-500/50 bg-emerald-500/20 hover:border-emerald-400 hover:bg-emerald-500/35"
+    stopCls = "border-rose-500/60 bg-rose-500/25 hover:border-rose-400 hover:bg-rose-500/40"
   in
-    [ H.button
-        [ H.className (base <> runCls)
-        , H.attr "type" "button"
-        , H.dataAttr "run-cell" "1"
-        , H.dataAttr "cell-state" (if props.isRunning then "running" else "idle")
-        , H.titleAttr "Run cell (⌘↵)"
-        , H.OnClick props.onRun
-        ]
-        [ H.text "▶" ]
-    , H.button
-        [ H.className (base <> stopCls)
-        , H.attr "type" "button"
-        , H.dataAttr "stop-cell" "1"
-        , H.titleAttr "Stop cell"
-        , H.OnClick props.onStop
-        ]
-        [ H.text "■" ]
-    ]
+    if props.isRunning then
+      [ H.button
+          [ H.className (base <> stopCls)
+          , H.attr "type" "button"
+          , H.dataAttr "stop-cell" "1"
+          , H.dataAttr "cell-state" "running"
+          , H.titleAttr "Stop cell"
+          , H.OnClick props.onStop
+          ]
+          [ H.text "■" ]
+      ]
+    else
+      [ H.button
+          [ H.className (base <> runCls)
+          , H.attr "type" "button"
+          , H.dataAttr "run-cell" "1"
+          , H.dataAttr "cell-state" "idle"
+          , H.titleAttr "Run cell (⌘↵)"
+          , H.OnClick props.onRun
+          ]
+          [ H.text "▶" ]
+      ]
 
 menuItemView :: MenuItem -> Array (H.Html (Effect Unit))
 menuItemView item =

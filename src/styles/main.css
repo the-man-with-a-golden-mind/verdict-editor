@@ -354,15 +354,25 @@ body.notebook-resize-active * {
 /* Surfaces */
 .theme-light .bg-\[\#0b0f1a\],
 .theme-light .bg-slate-950,
+.theme-light .bg-slate-950\/90,
+.theme-light .bg-slate-950\/80,
 .theme-light .bg-slate-950\/70,
 .theme-light .bg-slate-950\/60 { background-color: #ffffff !important; }
 .theme-light .bg-slate-900,
 .theme-light .bg-slate-900\/40,
 .theme-light .bg-slate-900\/60,
 .theme-light .bg-slate-900\/70,
-.theme-light .bg-slate-900\/80 { background-color: #f8fafc !important; }
+.theme-light .bg-slate-900\/80,
+.theme-light .bg-slate-800,
+.theme-light .bg-slate-800\/80,
+.theme-light .bg-slate-800\/60 { background-color: #f1f5f9 !important; }
 .theme-light .bg-\[\#0d1322\] { background-color: #f1f5f9 !important; }
-.theme-light .hover\:bg-slate-800:hover { background-color: #eef2f7 !important; }
+.theme-light .hover\:bg-slate-800:hover { background-color: #e2e8f0 !important; }
+
+/* Top header strip: white bar, dark text, defined bottom border. */
+.theme-light .hover\:text-white:hover { color: #0f172a !important; }
+.theme-light .from-violet-400 { --tw-gradient-from: #34d399 !important; }
+.theme-light .to-indigo-600 { --tw-gradient-to: #047857 !important; }
 
 /* Text */
 .theme-light .text-white,
@@ -373,13 +383,21 @@ body.notebook-resize-active * {
 .theme-light .text-slate-500 { color: #475569 !important; }
 .theme-light .text-slate-600 { color: #94a3b8 !important; }
 
-/* Borders */
+/* Borders — clearly defined (near-black) on white, per request. */
 .theme-light .border-slate-800,
 .theme-light .border-slate-800\/80,
 .theme-light .border-slate-800\/60,
 .theme-light .border-slate-700,
 .theme-light .border-slate-700\/70,
-.theme-light .border-slate-700\/80 { border-color: #e2e8f0 !important; }
+.theme-light .border-slate-700\/80,
+.theme-light .border-slate-600 { border-color: #475569 !important; }
+
+/* Action buttons: keep the colored fill/border, but the label must read black
+   (the light-green / light-red label text was unreadable on white). */
+.theme-light .text-emerald-200,
+.theme-light .text-emerald-100 { color: #0f172a !important; }
+.theme-light .text-rose-200,
+.theme-light .text-rose-100 { color: #9f1239 !important; }
 
 /* Accent: indigo -> emerald (landing-page green) */
 .theme-light .text-indigo-200,
@@ -419,3 +437,25 @@ body.notebook-resize-active * {
 .theme-light .verdict-hl-comment { color: #64748b; }
 .theme-light .verdict-hl-operator { color: #2563eb; }
 .theme-light .verdict-hl-bracket { color: #475569; }
+
+/* ── Visual tab (hylograph code-block view) ─────────────────────────────────
+   The block renderer uses bright pastel token classes tuned for a dark canvas
+   (text-*-200/300). On white they wash out — remap to readable dark tones, and
+   lighten the slate block backgrounds that weren't covered above. */
+.theme-light .text-emerald-300 { color: #047857 !important; }
+.theme-light .text-violet-200,
+.theme-light .text-purple-300 { color: #7c3aed !important; }
+.theme-light .text-amber-300,
+.theme-light .text-amber-200 { color: #b45309 !important; }
+.theme-light .text-cyan-300 { color: #0e7490 !important; }
+.theme-light .text-sky-300 { color: #0369a1 !important; }
+.theme-light .text-blue-300 { color: #1d4ed8 !important; }
+.theme-light .text-rose-300,
+.theme-light .text-rose-400 { color: #be123c !important; }
+.theme-light .bg-slate-950\/50,
+.theme-light .bg-slate-950\/40,
+.theme-light .bg-slate-950\/30 { background-color: #ffffff !important; }
+.theme-light .bg-slate-800\/40,
+.theme-light .bg-slate-700,
+.theme-light .bg-slate-700\/70 { background-color: #f1f5f9 !important; }
+.theme-light .bg-violet-600\/40 { background-color: rgba(124, 58, 237, 0.16) !important; }

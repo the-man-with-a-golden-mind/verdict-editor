@@ -2429,6 +2429,9 @@ class VerdictEditorElement extends HTMLElement {
     } catch {
       /* ignore */
     }
+    // Re-skin every open CodeMirror editor (shell + notebook cells live in
+    // separate bundles; both listen for this event and reconfigure in place).
+    window.dispatchEvent(new CustomEvent('verdict-theme-change', { detail: { light } }));
     // Charts read theme colors at render time; nudge the visual tab to repaint.
     this.vizDirty = true;
     if (this.activeMainTab === 'visual') void this.refreshVisualization();

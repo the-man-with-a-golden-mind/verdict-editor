@@ -24,6 +24,27 @@ export const VERDICT_COLORS = {
   selection: "#3730a3aa",
 };
 
+/** Light-theme palette — dark, readable tokens on a white background. Mirrors
+ *  the static `.verdict-hl-*` light colors so preview and live editor match. */
+export const VERDICT_COLORS_LIGHT = {
+  keyword: "#7c3aed",
+  type: "#0d9488",
+  identifier: "#1e293b",
+  string: "#b45309",
+  stringEscape: "#92400e",
+  number: "#be185d",
+  comment: "#64748b",
+  operator: "#2563eb",
+  delimiter: "#475569",
+  background: "#ffffff",
+  foreground: "#0f172a",
+  lineHighlight: "rgba(16, 185, 129, 0.07)",
+  lineNumber: "#94a3b8",
+  lineNumberActive: "#059669",
+  cursor: "#0f172a",
+  selection: "#93c5fd66",
+};
+
 const KEYWORDS = new Set([
   "module", "exposing", "if", "then", "else", "let", "in", "switch", "match", "type", "import",
 ]);
@@ -130,6 +151,29 @@ export const bytecodeHighlightStyle = HighlightStyle.define([
   { tag: t.number, color: VERDICT_COLORS.number },
   { tag: t.bracket, color: VERDICT_COLORS.delimiter },
   { tag: t.punctuation, color: VERDICT_COLORS.delimiter },
+]);
+
+/** Light-theme highlight styles (activated when the IDE is in light mode). */
+export const verdictHighlightStyleLight = HighlightStyle.define([
+  { tag: t.keyword, color: VERDICT_COLORS_LIGHT.keyword, fontWeight: "bold" },
+  { tag: t.typeName, color: VERDICT_COLORS_LIGHT.type },
+  { tag: t.variableName, color: VERDICT_COLORS_LIGHT.identifier },
+  { tag: t.string, color: VERDICT_COLORS_LIGHT.string },
+  { tag: t.number, color: VERDICT_COLORS_LIGHT.number },
+  { tag: t.float, color: VERDICT_COLORS_LIGHT.number },
+  { tag: t.lineComment, color: VERDICT_COLORS_LIGHT.comment, fontStyle: "italic" },
+  { tag: t.operator, color: VERDICT_COLORS_LIGHT.operator },
+  { tag: t.bracket, color: VERDICT_COLORS_LIGHT.delimiter },
+  { tag: t.invalid, color: "#e11d48" },
+]);
+
+export const bytecodeHighlightStyleLight = HighlightStyle.define([
+  { tag: t.propertyName, color: VERDICT_COLORS_LIGHT.type },
+  { tag: t.string, color: VERDICT_COLORS_LIGHT.string },
+  { tag: t.keyword, color: VERDICT_COLORS_LIGHT.keyword },
+  { tag: t.number, color: VERDICT_COLORS_LIGHT.number },
+  { tag: t.bracket, color: VERDICT_COLORS_LIGHT.delimiter },
+  { tag: t.punctuation, color: VERDICT_COLORS_LIGHT.delimiter },
 ]);
 
 export const verdictSyntaxExtensions = [
