@@ -49,7 +49,7 @@ const libraryLinkHelpers = [
   "  return /\\b(busPost|busRead|busQueue|busPending|busTakeFirst)\\b/.test(src);",
   "};",
   "var usesDisplayLibrary = function(src) {",
-  "  return /\\b(dText|dTrace|dLine|dArea|dStep|dMarkers|dChart|dChartY|dChartY2|dStack|dRow|dCol|dTable)\\b/.test(src);",
+  "  return /\\b(dText|dTrace|dLine|dArea|dStep|dMarkers|dBar|dScatter|dLineW|dHistogram|dCandles|dChart|dChartY|dChartY2|dChartLog|dStack|dRow|dCol|dTable)\\b/.test(src);",
   "};",
   "var usesLoopLibrary = function(src) {",
   "  return /\\b(sleep|loopEvery)\\b/.test(src);",

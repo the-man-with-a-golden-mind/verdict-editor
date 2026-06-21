@@ -34,8 +34,27 @@ export function renderChartImpl(host) {
           const onY2 = t.axis === "y2" || t.yaxis === "y2";
           const base = { name: t.name ?? `series ${i + 1}`, x, y, yaxis: onY2 ? "y2" : "y" };
 
+          if (kind === "candlestick") {
+            // OHLC candles: x + open/high/low/close lists.
+            return {
+              name: t.name ?? `series ${i + 1}`,
+              x,
+              open: t.open ?? [],
+              high: t.high ?? [],
+              low: t.low ?? [],
+              close: t.close ?? [],
+              type: "candlestick",
+              yaxis: onY2 ? "y2" : "y",
+              increasing: { line: { color: t.color || "#34d399" } },
+              decreasing: { line: { color: "#f87171" } },
+            };
+          }
+          if (kind === "histogram") {
+            // Distribution of values (x = the samples).
+            return { ...base, type: "histogram", marker: { color }, opacity: t.opacity ?? 0.78 };
+          }
           if (kind === "bar") {
-            return { ...base, type: "bar", marker: { color, line: { width: 0 } }, opacity: 0.85 };
+            return { ...base, type: "bar", marker: { color, line: { width: 0 } }, opacity: t.opacity ?? 0.85 };
           }
           const isArea = kind === "area";
           const isStep = kind === "step";
@@ -63,12 +82,18 @@ export function renderChartImpl(host) {
             ...base,
             type: "scatter",
             mode: "lines",
-            line: { color, width: isStep ? 2.5 : 2, shape: isStep ? "hv" : "spline" },
+            line: {
+              color,
+              width: Number.isFinite(t.width) ? t.width : isStep ? 2.5 : 2,
+              shape: isStep ? "hv" : "spline",
+              dash: t.dash || "solid",
+            },
+            opacity: Number.isFinite(t.opacity) ? t.opacity : 1,
             hovertemplate: `bar %{x}<br>%{y:,}<extra>${t.name ?? ""}</extra>`,
           };
           if (isArea) {
             trace.fill = "tozeroy";
-            trace.fillcolor = withAlpha(color, 0.22);
+            trace.fillcolor = withAlpha(color, Number.isFinite(t.opacity) ? t.opacity : 0.22);
           }
           return trace;
         });
@@ -144,10 +169,14 @@ export function renderChartImpl(host) {
           xaxis: {
             ...axisBase,
             title: { text: spec?.xaxis?.title ?? "", font: { size: 10, color: "#64748b" } },
+            ...(spec?.xaxis?.type === "log" ? { type: "log" } : {}),
+            ...(Array.isArray(spec?.xaxis?.range) ? { range: spec.xaxis.range, autorange: false } : {}),
           },
           yaxis: {
             ...axisBase,
             title: { text: spec?.yaxis?.title ?? "", font: { size: 10, color: "#64748b" } },
+            ...(spec?.yaxis?.type === "log" ? { type: "log" } : {}),
+            ...(Array.isArray(spec?.yaxis?.range) ? { range: spec.yaxis.range, autorange: false } : {}),
           },
         };
         if (hasY2) {
