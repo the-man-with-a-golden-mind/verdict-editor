@@ -1141,6 +1141,7 @@ class VerdictEditorElement extends HTMLElement {
       // tables) when the tab opens, and poll while it stays open so it updates
       // during an endless (actor) run that never returns a result.
       this.startDbDebugPoll();
+      if (tab === 'debug') this.refreshBytecodeView();
       void this.syncFinvmFromWorker().then(() => {
         if (this.activeMainTab !== tab) return;
         if (tab === 'debug') this.renderVmState(this.finvmState);
@@ -1605,7 +1606,15 @@ class VerdictEditorElement extends HTMLElement {
     if (!this.liveBusy) {
       this.liveBusy = true;
       try {
-        await this.runProgram();
+        // "Run every X seconds" = a plain global timer: stop all cells, then run
+        // them all fresh, each tick. (Per-cell looping is the cell's own job via
+        // an actor — this is the environment-driven re-run for other cases.)
+        this.notebookApi?.stopAll?.();
+        if (this.notebookApi?.runAll) {
+          await this.notebookApi.runAll();
+        } else {
+          await this.runProgram();
+        }
       } catch {
         /* keep the loop alive across transient run errors */
       } finally {
@@ -1727,6 +1736,28 @@ class VerdictEditorElement extends HTMLElement {
     this.resizeCleanup = () => {
       handle.removeEventListener('mousedown', onMouseDown);
     };
+  }
+
+  /** Populate the Debug "FinVM Bytecode" pane from the current program. Notebook
+   * cells eval on the worker (not executeProgram), so the bytecode view was never
+   * filled; compile on the main thread for display only. Uses the notebook
+   * compiler (compileBindingsJS) so the Verdict libraries (IDE/Display/…) link. */
+  private refreshBytecodeView(): void {
+    if (!vlib || !this.bytecodeEditor) return;
+    const code = this.materializeInputs(this.getProgramSource());
+    const compile = vlib.compileBindingsJS ?? vlib.compileJS;
+    const c = compile(code);
+    if (c.ok) {
+      this.bytecodeEditor.setValue(c.output);
+      try {
+        this.latestCompiledProgram = JSON.parse(c.output);
+      } catch {
+        this.latestCompiledProgram = null;
+      }
+    } else {
+      this.bytecodeEditor.setValue(`// compile error: ${c.error}`);
+      this.latestCompiledProgram = null;
+    }
   }
 
   private renderVmState(snapshot: unknown) {

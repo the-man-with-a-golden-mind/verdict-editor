@@ -328,8 +328,16 @@ export function mountNotebookImpl(selector) {
             void patchCellDom(cellId);
             return;
           }
+          // Preserve the scroll position across the live re-render so reading the
+          // output isn't interrupted (each emit rebuilds the content, which would
+          // otherwise snap back to the top).
+          const top = host.scrollTop;
+          const left = host.scrollLeft;
           host.innerHTML = "";
-          void renderDisplayInto(host, value, bridge);
+          Promise.resolve(renderDisplayInto(host, value, bridge)).then(() => {
+            host.scrollTop = top;
+            host.scrollLeft = left;
+          });
         }
 
         function concatenate() {
