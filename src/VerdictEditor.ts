@@ -273,6 +273,7 @@ class VerdictEditorElement extends HTMLElement {
   private positionBiasInput: HTMLInputElement | null = null;
   private loopIntervalInput: HTMLInputElement | null = null;
   private historyCapInput: HTMLInputElement | null = null;
+  private curveCapInput: HTMLInputElement | null = null;
   private telegramBotTokenInput: HTMLInputElement | null = null;
   private telegramChatIdInput: HTMLInputElement | null = null;
   private runToggleBtn: HTMLButtonElement | null = null;
@@ -658,6 +659,13 @@ class VerdictEditorElement extends HTMLElement {
     this.historyCapInput.value = '240';
     this.historyCapInput.setAttribute('aria-label', 'History cap (points)');
     this.historyCapInput.oninput = () => this.onRuntimeInputsChanged();
+    this.curveCapInput = document.createElement('input');
+    this.curveCapInput.type = 'number';
+    this.curveCapInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
+    this.curveCapInput.value = '0';
+    this.curveCapInput.setAttribute('aria-label', 'Equity-curve cap (0 = unbounded)');
+    this.curveCapInput.title = 'Backtest curve length: 0 keeps the full history (unbounded); N keeps the last N bars.';
+    this.curveCapInput.oninput = () => this.onRuntimeInputsChanged();
     this.telegramBotTokenInput = document.createElement('input');
     this.telegramBotTokenInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
     this.telegramBotTokenInput.value = '';
@@ -682,6 +690,8 @@ class VerdictEditorElement extends HTMLElement {
     fixedInputs.appendChild(this.loopIntervalInput);
     fixedInputs.appendChild(mkLabel('historyCap'));
     fixedInputs.appendChild(this.historyCapInput);
+    fixedInputs.appendChild(mkLabel('curveCap'));
+    fixedInputs.appendChild(this.curveCapInput);
     fixedInputs.appendChild(mkLabel('telegramBotToken'));
     fixedInputs.appendChild(this.telegramBotTokenInput);
     fixedInputs.appendChild(mkLabel('telegramChatId'));
@@ -2564,6 +2574,7 @@ class VerdictEditorElement extends HTMLElement {
       positionBias: Number(this.positionBiasInput?.value ?? '0'),
       loopIntervalMs: Number(this.loopIntervalInput?.value ?? '5000'),
       historyCap: Number(this.historyCapInput?.value ?? '240'),
+      curveCap: Number(this.curveCapInput?.value ?? '0'),
       telegramBotToken: this.telegramBotTokenInput?.value ?? '',
       telegramChatId: this.telegramChatIdInput?.value ?? '',
     };

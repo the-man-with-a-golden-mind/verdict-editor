@@ -1,4 +1,4 @@
-module Market exposing (binanceSymbol, binancePriceUrl, binanceKlinesUrl, dollarsToCents, jsonStringField, priceCentsFromBody, fetchPriceCents, fetchHistPricesCents, histKey, histCsvOrEmpty, appendHistCsv, saveHistCsv, pushParsed, parseCsvInts, lastN, lastInt, listMin, listMax, isqrt, statsOf, meanOf, varianceOf, stddevOf, zScoreOf, emaOf, slopeOf, rangePosOf, momentumOf, appendStr, joinStr, centsToUsd, signedCentis, scoreOf, decisionFromScore, klineCloseCents, parseKlinesBody, indicesOf)
+module Market exposing (binanceSymbol, binancePriceUrl, binanceKlinesUrl, dollarsToCents, jsonStringField, priceCentsFromBody, fetchPriceCents, fetchHistPricesCents, histKey, histCsvOrEmpty, appendHistCsv, saveHistCsv, pushParsed, parseCsvInts, lastN, lastInt, listMin, listMax, isqrt, statsOf, meanOf, varianceOf, stddevOf, zScoreOf, emaOf, slopeOf, rangePosOf, momentumOf, appendStr, joinStr, centsToUsd, signedCentis, scoreOf, decisionFromScore, klineCloseCents, parseKlinesBody, indicesOf, joinCsvInt, intsToCsv, csvToInts, cacheStrOr, cachePutStr, seqKey, barSeqOf, saveBarSeq, simKey, nthStr, capInts)
 
 -- Market: shared market-data + indicator + scoring helpers for notebook cells.
 -- Cells `import Market exposing (..)` instead of redefining these, so cell 1 and
@@ -83,6 +83,51 @@ appendHistCsv csv px =
 
 saveHistCsv : String -> String -> Bool
 saveHistCsv sym csv = cacheSet("market", histKey(sym), csv)
+
+-- ── Generic KV (string cache) + monotonic bar sequence ──────────────────────
+cacheStrOr : String -> String
+cacheStrOr key =
+  let raw = cacheGet("market", key) in
+  if raw == unit then "" else raw
+
+cachePutStr : String -> String -> Bool
+cachePutStr key val = cacheSet("market", key, val)
+
+-- Monotonic count of bars the producer has published for a symbol (never
+-- shrinks even as the rolling history is capped). The simulator diffs this
+-- against its own checkpoint to find the freshest bars to process.
+seqKey : String -> String
+seqKey sym = strConcat("seq:", sym)
+
+barSeqOf : String -> Int
+barSeqOf sym = withDefault(0, parseInt(cacheStrOr(seqKey(sym))))
+
+saveBarSeq : String -> Int -> Bool
+saveBarSeq sym n = cachePutStr(seqKey(sym), fromInt(n))
+
+-- Cache key holding the simulator's persisted walk-forward state per symbol.
+simKey : String -> String
+simKey sym = strConcat("sim:", sym)
+
+-- ── Int-list <-> CSV (sim-state serialization) ──────────────────────────────
+joinCsvInt : String -> Int -> String
+joinCsvInt acc n =
+  if strLength(acc) == 0 then fromInt(n) else strConcat(acc, strConcat(",", fromInt(n)))
+
+intsToCsv : List Int -> String
+intsToCsv xs = foldl(joinCsvInt, "", xs)
+
+-- Empty-safe parse: "" -> [] (plain parseCsvInts("") would yield [0]).
+csvToInts : String -> List Int
+csvToInts s = if strLength(s) == 0 then [] else parseCsvInts(s)
+
+-- nth string of a list (for reading serialized state sections); "" if absent.
+nthStr : Int -> List String -> String
+nthStr n xs = withDefault("", head(drop(n, xs)))
+
+-- Keep only the last n ints; n < 1 means "no cap" (return all, unbounded).
+capInts : Int -> List Int -> List Int
+capInts n xs = if n < 1 then xs else lastN(n, xs)
 
 -- ── Series parsing & windowing ──────────────────────────────────────────────
 pushParsed : List Int -> String -> List Int
