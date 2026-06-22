@@ -328,16 +328,27 @@ export function mountNotebookImpl(selector) {
             void patchCellDom(cellId);
             return;
           }
-          // Preserve the scroll position across the live re-render so reading the
-          // output isn't interrupted (each emit rebuilds the content, which would
-          // otherwise snap back to the top).
-          const top = host.scrollTop;
-          const left = host.scrollLeft;
+          // Live re-render without the view jumping. Two things move on each emit:
+          // the output's own scroll, and — the real culprit — the outer cell stack.
+          // renderDisplayInto is async (charts), so clearing now collapses the
+          // output box to zero height; the stack reflows up and snaps the reader to
+          // the top, refilling a tick later. Freeze the box's current height across
+          // the swap so nothing reflows, then restore BOTH scroll positions (the
+          // inner output and the outer stack) once the new content is painted. This
+          // is generic — it applies to every cell's output, no per-cell logic.
+          const innerTop = host.scrollTop;
+          const innerLeft = host.scrollLeft;
+          const stackTop = stack.scrollTop;
+          const prevHeight = host.style.height;
+          host.style.height = `${host.offsetHeight}px`;
           host.innerHTML = "";
-          Promise.resolve(renderDisplayInto(host, value, bridge)).then(() => {
-            host.scrollTop = top;
-            host.scrollLeft = left;
-          });
+          const restore = () => {
+            host.style.height = prevHeight; // back to the cell's sizing mode (capped/none/pinned)
+            host.scrollTop = innerTop;
+            host.scrollLeft = innerLeft;
+            stack.scrollTop = stackTop;
+          };
+          Promise.resolve(renderDisplayInto(host, value, bridge)).then(restore, restore);
         }
 
         function concatenate() {
