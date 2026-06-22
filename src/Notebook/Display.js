@@ -59,14 +59,21 @@ async function renderLayout(host, d, bridge, layoutKind) {
     heading.textContent = d.title;
     layoutEl.appendChild(heading);
   }
-  for (const item of d.items ?? []) {
+  // Attach the layout AND every item slot to the live DOM BEFORE rendering their
+  // content. Charts must measure their final flex width when they render —
+  // otherwise Plotly can't size to a detached node and falls back to its 700px
+  // default, overflowing its column (covering the neighbour) and the text below.
+  host.appendChild(layoutEl);
+  const slots = (d.items ?? []).map((item) => {
     const child = document.createElement("div");
     child.className =
       layoutKind === "row" ? "notebook-display-row__item min-w-[min(100%,380px)] flex-1" : "";
     layoutEl.appendChild(child);
+    return [child, item];
+  });
+  for (const [child, item] of slots) {
     await renderDisplayInto(child, item, bridge);
   }
-  host.appendChild(layoutEl);
 }
 
 export async function renderDisplayInto(host, raw, bridge) {

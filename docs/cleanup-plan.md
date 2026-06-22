@@ -75,6 +75,33 @@ release. Document *why* they're committed.
 - Add eslint + prettier configs and a `.github/workflows` running `build:all` +
   `test:notebook` + `typecheck` on PRs. This is what prevents the mess from creeping back.
 
+### I. Output-rendering redesign (the right fix for a whole bug class) — HIGH PRIORITY
+The cell-output renderer (`src/Notebook/Display.js` + the emit path in
+`NotebookMount.js`) is hand-rolled imperative DOM: `innerHTML` wipes, a bolted-on
+`reconcileDisplayInto`, manual scroll/height preservation, and Plotly sized
+imperatively. A run of bugs — view jumping to the top on live updates, chart
+zoom/pan reset every tick, charts rendering at Plotly's 700px default and
+overlapping their neighbour / covering text — are **all symptoms of having no real
+rendering model**. Each was patched individually; that doesn't converge.
+
+Redesign so update correctness is *structural*, not re-derived per bug:
+- Render the Display tree (text/layout/table) through **ps-spa's virtual DOM**
+  (already in the stack, Elm-style). Diffing preserves DOM identity → scroll,
+  focus, and selection survive updates for free; no `innerHTML` wipes.
+- Treat **charts as managed leaf components** with an explicit lifecycle: mount
+  (`Plotly.newPlot`), update (`Plotly.react` + `uirevision`), and **resize via a
+  `ResizeObserver`** on the container. That kills both the detached-default-size
+  overlap and the "never re-fits after reflow" classes of bug at the source.
+- **One render path** for initial render and live emits — delete the separate
+  `reconcileDisplayInto`, the height-freeze, and the scroll-restore patches; they
+  become unnecessary.
+- The spreadsheet (already ps-spa) joins the same model, so its interactive state
+  (scroll/selection/edit) is preserved too — closing the gap noted earlier.
+
+This single redesign subsumes the scroll-jump, chart-zoom, chart-overlap, and
+spreadsheet-state fixes. The interim patches shipped for the release should be
+removed as part of it.
+
 ### H. The big strangler (separate, ongoing)
 Continue `NotebookMount.js` (~1600-line blob) → PureScript per the existing
 `docs/notebook-purescript-refactor-plan.md`. This is the largest "hack" but it's already a
