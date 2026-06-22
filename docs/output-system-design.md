@@ -108,6 +108,30 @@ that flows back into the program. It maps cleanly onto the existing architecture
 Phase 1 leaves widgets non-interactive; the schema reserves `id` and the channel name so
 phase 2 is additive.
 
+## Implementation: PureScript-first
+The whole output renderer is **PureScript** (`Notebook.Output`): the Display ADT + decode,
+the widget/layout view, styling merge, tabs/fullscreen/collapse state, and the update loop.
+This also advances the strangler (it moves output rendering off `Display.js`).
+
+ps-spa's `Runtime.start` is page/route-scoped, and the existing PS mounts (gutter/nav/sheet)
+are stateless one-shot renders — neither fits a stateful component mounted into one cell's
+output element. So `Notebook.Output` is a **mini-TEA driver in PureScript**:
+- `Model = { display :: Display, ui :: UiState }` held in a `Ref`; `Msg` = tab/fullscreen/
+  collapse events; `view :: (Msg -> Effect Unit) -> Model -> Array (Html Msg)`.
+- On each `Msg` (from `H.OnClick`) or external `setDisplay json`, update the `Ref` and
+  re-render via ps-spa's **in-place diffing reconcile** (`Browser.reconcileChildren`, confirmed
+  to diff positionally, not wipe) → DOM identity preserved → scroll/focus/zoom survive.
+- `mountOutputExport :: EffectFn1 Foreign OutputHandle` returns `{ setDisplay, destroy }`,
+  registered as `__notebookMountOutput` in `bundle-entry.mjs`. `renderDisplayInto` becomes a
+  thin shim that get-or-creates the handle per host and calls `setDisplay`.
+
+**Thin FFI boundary** — only genuinely JS-only APIs, each a few lines:
+- `ChartManager` (Plotly + `ResizeObserver`): `syncCharts(host, specsByKey)` / `destroy`.
+- element-render binding (`reconcileChildren(host, htmlArray)`) if ps-spa doesn't already
+  export an element-targeted render.
+- CSV download (`Blob` + `<a download>`).
+Everything else — decode, layout, styling, state, events — is PureScript.
+
 ## Phasing
 - **Phase 1 (this):** renderer redesign (per `output-renderer-design.md`) **+** the styled
   widget DSL: `dBox`/`dFull`, `dGrid`/`dSection`/`dTabs` (presentational), `dSheet`
