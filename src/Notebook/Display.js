@@ -3,7 +3,7 @@
 import { renderChartImpl } from "./PlotlyFFI.js";
 import { renderSpreadsheetTable } from "./Spreadsheet.js";
 
-function markdownToHtml(md) {
+export function markdownToHtml(md) {
   return String(md ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")

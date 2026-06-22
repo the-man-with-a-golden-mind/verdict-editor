@@ -14,6 +14,7 @@ export {
   decodeDisplayKindExport,
   spreadsheetCsvExport,
   renderDisplayIntoExport,
+  renderOutputIntoExport,
   mountSpreadsheetViewExport,
   mountToolbarExport,
   mountGutterExport,
@@ -50,6 +51,7 @@ export {
 import { registerPsMountTable } from "./Spreadsheet.js";
 import {
   mountSpreadsheetViewExport,
+  renderOutputIntoExport,
   mountToolbarExport as psMountToolbar,
   mountGutterExport as psMountGutter,
   mountCellsNavExport as psMountCellsNav,
@@ -69,6 +71,12 @@ globalThis.__psSpaRenderDocumentOn = (host, documentConfig) => {
 
 globalThis.__notebookMountSpreadsheet = mountSpreadsheetViewExport;
 registerPsMountTable(mountSpreadsheetViewExport);
+
+// The PureScript output renderer (Notebook.Output): (host, raw Display, bridge).
+// Renders the widget structure via the diffing reconcile, then fills the leaf
+// widgets (charts/tables/markdown). Replaces the JS renderDisplayInto path.
+globalThis.__notebookRenderOutput = (host, raw, bridge) =>
+  renderOutputIntoExport(host, raw, bridge);
 
 // Mount the PureScript ps-spa toolbar into `host`, wiring each button to the
 // supplied JS callback thunks (Effect Unit across FFI).

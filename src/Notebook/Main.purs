@@ -14,6 +14,7 @@ module Main
   , decodeDisplayKindExport
   , spreadsheetCsvExport
   , renderDisplayIntoExport
+  , renderOutputIntoExport
   , mountSpreadsheetViewExport
   , mountToolbarExport
   , mountGutterExport
@@ -44,6 +45,7 @@ import Notebook.CellsNav as CN
 import Notebook.CellView as CV
 import Notebook.Gutter as GT
 import Notebook.Model as NM
+import Notebook.Output as OUT
 import Notebook.Run as RN
 import Notebook.Toolbar as TB
 import Seed (seedSignature)
@@ -159,6 +161,9 @@ cellViewPlanExport = mkEffectFn1 \input -> pure (CV.cellViewPlan input)
 
 renderDisplayIntoExport :: EffectFn3 Foreign Foreign Foreign Unit
 renderDisplayIntoExport = D.renderDisplayIntoExport
+
+renderOutputIntoExport :: EffectFn3 Foreign Foreign Foreign Unit
+renderOutputIntoExport = OUT.renderOutputInto
 
 foreign import tableHeaders :: Foreign -> Array String
 foreign import tableBody :: Foreign -> Array (Array String)
