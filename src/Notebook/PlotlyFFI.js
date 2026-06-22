@@ -164,6 +164,11 @@ export function renderChartImpl(host) {
           hovermode: "x unified",
           hoverlabel: { bgcolor: T.hover, bordercolor: T.hoverBorder, font: { size: 11 } },
           dragmode: "pan",
+          // Preserve the viewer's zoom/pan/legend across live data updates: as long
+          // as this is unchanged between Plotly.react calls on the same element,
+          // Plotly keeps the current axis range instead of snapping to autorange.
+          // Keyed by title so a genuinely different chart in the slot resets cleanly.
+          uirevision: titleText || "verdict",
           showlegend: traces.length > 1,
           legend: {
             orientation: "h",

@@ -102,6 +102,63 @@ export async function renderDisplayInto(host, raw, bridge) {
   }
 }
 
+// Which Display kind currently occupies `host` (read back from the DOM that
+// renderDisplayInto produced), so a live update can tell whether the shape is
+// unchanged and reuse the existing nodes instead of rebuilding.
+function existingDisplayKind(host) {
+  const w = host.firstElementChild;
+  if (!w) return null;
+  if (w.dataset?.plotlyChart) return "chart";
+  if (w.dataset?.displayStack) return "stack";
+  if (w.dataset?.displayCol) return "col";
+  if (w.dataset?.displayRow) return "row";
+  if (w.classList?.contains("notebook-text-output")) return "text";
+  return "other";
+}
+
+/**
+ * Update `host` to show `raw`, reusing existing DOM when the Display tree shape
+ * is unchanged. This is what lets a live (looping) cell refresh without throwing
+ * away the viewer's chart zoom/pan: charts are updated in place via Plotly.react
+ * (which, with the layout's stable uirevision, preserves the current axis range),
+ * text is patched, and only a genuine structural change falls back to a full
+ * rebuild. Mirrors renderDisplayInto's structure exactly.
+ */
+export async function reconcileDisplayInto(host, raw, bridge) {
+  const d = decodeDisplay(raw);
+  if (!d) return renderDisplayInto(host, raw, bridge);
+  const reconcilable =
+    existingDisplayKind(host) === d.kind &&
+    (d.kind === "text" || d.kind === "chart" || d.kind === "stack" || d.kind === "col" || d.kind === "row");
+  if (!reconcilable) return renderDisplayInto(host, raw, bridge);
+
+  const w = host.firstElementChild;
+  if (d.kind === "text") {
+    w.innerHTML = markdownToHtml(d.text ?? "");
+    return;
+  }
+  if (d.kind === "chart") {
+    // Re-react the EXISTING plot element (do NOT clear it first): Plotly.react
+    // diffs the new data against the live plot and keeps zoom/pan via uirevision.
+    await renderChartImpl(w)(d)(bridge)();
+    return;
+  }
+  // Layout (stack/col/row): reuse the wrapper if heading-presence and child count
+  // match, then reconcile each child; otherwise rebuild this subtree.
+  const items = d.items ?? [];
+  const hasHeading = !!w.firstElementChild?.classList?.contains("notebook-display-heading");
+  if (!!d.title !== hasHeading) return renderDisplayInto(host, raw, bridge);
+  let childEls = Array.from(w.children);
+  if (hasHeading) {
+    if (childEls[0].textContent !== d.title) childEls[0].textContent = d.title ?? "";
+    childEls = childEls.slice(1);
+  }
+  if (childEls.length !== items.length) return renderDisplayInto(host, raw, bridge);
+  for (let i = 0; i < items.length; i++) {
+    await reconcileDisplayInto(childEls[i], items[i], bridge);
+  }
+}
+
 export function renderDisplayIntoImpl(host) {
   return function (raw) {
     return function (bridge) {

@@ -1,7 +1,7 @@
 "use strict";
 
 import { mountWysiwyg } from "./WysiwygFFI.js";
-import { decodeDisplay, renderDisplayInto } from "./Display.js";
+import { decodeDisplay, renderDisplayInto, reconcileDisplayInto } from "./Display.js";
 import {
   createVerdictEditor,
   disposeVerdictEditor,
@@ -341,14 +341,16 @@ export function mountNotebookImpl(selector) {
           const stackTop = stack.scrollTop;
           const prevHeight = host.style.height;
           host.style.height = `${host.offsetHeight}px`;
-          host.innerHTML = "";
           const restore = () => {
             host.style.height = prevHeight; // back to the cell's sizing mode (capped/none/pinned)
             host.scrollTop = innerTop;
             host.scrollLeft = innerLeft;
             stack.scrollTop = stackTop;
           };
-          Promise.resolve(renderDisplayInto(host, value, bridge)).then(restore, restore);
+          // Reconcile in place: same-shape updates reuse the chart elements (so
+          // Plotly.react keeps the viewer's zoom/pan); only a structural change
+          // rebuilds. No innerHTML wipe on the common path → no collapse/flash.
+          Promise.resolve(reconcileDisplayInto(host, value, bridge)).then(restore, restore);
         }
 
         function concatenate() {
