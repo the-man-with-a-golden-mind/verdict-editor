@@ -193,8 +193,12 @@ export function createFinvmHandlers(
   // reserved `__display__` cache namespace; the host renders it to the running
   // cell's output immediately instead of waiting for the eval's return value.
   onEmit?: (value: unknown) => void,
+  // Host-provided handlers, merged OVER the built-ins: a custom effect backend
+  // can replace one (e.g. http.get -> a CORS-proxying fetch) or add new effect
+  // types. Keyed by effect type ('http.get', 'db.insert', ...).
+  overrides?: Record<string, (payload: any) => unknown | Promise<unknown>>,
 ) {
-  return {
+  const handlers = {
     // Real `time.sleep@1` effect (EFFECT_AWAIT). A cell's `sleep`/`loopEvery`
     // helper emits this so the loop cadence lives in the cell source. The
     // generic effect payload passes the single arg through as `args`, so the
@@ -277,6 +281,7 @@ export function createFinvmHandlers(
       return storage.cacheDelete(String(p.ns ?? ''), key);
     },
   } as Record<string, (payload: Record<string, unknown>) => Promise<unknown>>;
+  return overrides ? ({ ...handlers, ...overrides } as typeof handlers) : handlers;
 }
 
 interface VmStepOutput {

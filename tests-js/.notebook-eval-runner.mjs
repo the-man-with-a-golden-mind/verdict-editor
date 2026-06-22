@@ -240,8 +240,8 @@ function shallowEqualJsonField(a, b) {
   }
   return String(a) === String(b);
 }
-function createFinvmHandlers(storage, fetchImpl = globalThis.fetch.bind(globalThis), signal, onEmit) {
-  return {
+function createFinvmHandlers(storage, fetchImpl = globalThis.fetch.bind(globalThis), signal, onEmit, overrides) {
+  const handlers = {
     // Real `time.sleep@1` effect (EFFECT_AWAIT). A cell's `sleep`/`loopEvery`
     // helper emits this so the loop cadence lives in the cell source. The
     // generic effect payload passes the single arg through as `args`, so the
@@ -323,6 +323,7 @@ function createFinvmHandlers(storage, fetchImpl = globalThis.fetch.bind(globalTh
       return storage.cacheDelete(String(p.ns ?? ""), key);
     }
   };
+  return overrides ? { ...handlers, ...overrides } : handlers;
 }
 function vmRunFinished(out) {
   return out.status === "completed" || out.status === "deadlock";
@@ -580,7 +581,7 @@ function compileNotebookProgramUncached(vlib, src, bindingName) {
   const r = vlib.compileJS(src);
   return r.ok ? { ok: true, output: r.output, entry: "main" } : { ok: false, error: r.error };
 }
-async function runBindingOnFinvm(finvm, programJson, bindingName, finvmState, effectStorage, sourceSig, signal, onEmit) {
+async function runBindingOnFinvm(finvm, programJson, bindingName, finvmState, effectStorage, sourceSig, signal, onEmit, fetchImpl, handlerOverrides) {
   try {
     const program = JSON.parse(programJson);
     if (!program.functions) return { ok: false, error: "Invalid compiled program" };
@@ -594,7 +595,7 @@ async function runBindingOnFinvm(finvm, programJson, bindingName, finvmState, ef
       state: userState,
       machineSnapshot: snapshot,
       entryFunction: bindingName,
-      handlers: createFinvmHandlers(effectStorage, void 0, signal, onEmit)
+      handlers: createFinvmHandlers(effectStorage, fetchImpl, signal, onEmit, handlerOverrides)
     });
     if (!vmOut.ok) return { ok: false, error: vmOut.error };
     const dbState = effectDbTablesToFinvmState(effectStorage.listDbTables());
@@ -663,7 +664,9 @@ async function evalNotebookCells(ctx, source, names, opts) {
       storage,
       srcSig,
       opts?.signal,
-      ctx.onEmit ? (value) => ctx.onEmit(opts?.cell?.id, value) : void 0
+      ctx.onEmit ? (value) => ctx.onEmit(opts?.cell?.id, value) : void 0,
+      ctx.fetchImpl,
+      ctx.effectHandlers
     );
     if (!run.ok) {
       outputs.push({ name, ok: false, typeSig: sigOf(name), error: run.error });

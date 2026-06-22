@@ -271,6 +271,8 @@ async function runBindingOnFinvm(
   sourceSig: string,
   signal?: AbortSignal,
   onEmit?: (value: unknown) => void,
+  fetchImpl?: typeof fetch,
+  handlerOverrides?: Record<string, (payload: any) => unknown | Promise<unknown>>,
 ): Promise<{ ok: true; result: unknown; finvmState: Record<string, unknown> } | { ok: false; error: string }> {
   try {
     const program = JSON.parse(programJson) as {
@@ -289,7 +291,7 @@ async function runBindingOnFinvm(
       state: userState,
       machineSnapshot: snapshot,
       entryFunction: bindingName,
-      handlers: createFinvmHandlers(effectStorage, undefined, signal, onEmit),
+      handlers: createFinvmHandlers(effectStorage, fetchImpl, signal, onEmit, handlerOverrides),
     });
     if (!vmOut.ok) return { ok: false, error: vmOut.error };
     const dbState = effectDbTablesToFinvmState(effectStorage.listDbTables());
@@ -315,6 +317,10 @@ export type NotebookEvalContext = {
   materialize: (source: string, cell?: { id?: string; index?: number }) => string;
   /** Render a Display value emitted live by a running cell to its output. */
   onEmit?: (cellId: string | undefined, value: unknown) => void;
+  /** Custom effect backend (sandbox uses neither): a fetch for runtime http
+   *  effects (e.g. a CORS proxy) and/or handler overrides merged over built-ins. */
+  fetchImpl?: typeof fetch;
+  effectHandlers?: Record<string, (payload: any) => unknown | Promise<unknown>>;
 };
 
 export type NotebookEvalOptions = {
@@ -395,6 +401,8 @@ export async function evalNotebookCells(
       srcSig,
       opts?.signal,
       ctx.onEmit ? (value) => ctx.onEmit!(opts?.cell?.id, value) : undefined,
+      ctx.fetchImpl,
+      ctx.effectHandlers,
     );
     if (!run.ok) {
       outputs.push({ name, ok: false, typeSig: sigOf(name), error: run.error });

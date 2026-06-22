@@ -38,6 +38,7 @@ import {
 import { bindingNamesInCell as resolveNotebookBindingNames } from './editor/notebookBindings';
 import { materializeIdeCellPlaceholders } from './editor/ideSession';
 import { blankNotebookDoc, type NotebookDoc } from './editor/notebookSeed';
+import { resolveLibUrl, setLibBase } from './editor/libBase';
 import {
   rawConfigForElement,
   resolveEditorConfig,
@@ -110,8 +111,9 @@ let libsPromise: Promise<void> | null = null;
 // while still giving us the module's named exports. The blob is self-contained
 // (no bare imports), so a blob-URL import resolves with nothing else to fetch.
 async function importPublicModule(url: string): Promise<any> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`failed to load ${url}: ${res.status}`);
+  const resolved = resolveLibUrl(url);
+  const res = await fetch(resolved);
+  if (!res.ok) throw new Error(`failed to load ${resolved}: ${res.status}`);
   const blobUrl = URL.createObjectURL(
     new Blob([await res.text()], { type: 'text/javascript' }),
   );
@@ -302,6 +304,10 @@ class VerdictEditorElement extends HTMLElement {
   connectedCallback() {
     if (this.built) return;
     this.built = true;
+    // Point the lazy /lib/*.mjs loaders at the host's base URL (if any) BEFORE
+    // the first fetch. Libs are global singletons, so the first element wins.
+    const libBaseUrl = rawConfigForElement(this)?.libBaseUrl;
+    if (libBaseUrl) setLibBase(libBaseUrl);
     // Start fetching the compiler/VM blobs as early as possible, in parallel
     // with building the DOM and CodeMirror editors.
     loadVerdictLibs();
@@ -331,7 +337,7 @@ class VerdictEditorElement extends HTMLElement {
     this.container.className = 'flex-1 min-h-0';
 
     // A small editor-pane header and main tabs (Notebook / DB / Visual / Debug).
-    const editorHeader = sectionHeader('Workspace', 'Main.verdict');
+    const editorHeader = sectionHeader(this.cfg.branding.title ?? 'Workspace', 'Main.verdict');
     const mainTabBar = document.createElement('div');
     mainTabBar.className = 'flex items-center gap-1 border-b border-slate-800 bg-slate-950 px-2 py-1.5';
     const mkMainTabBtn = (id: 'editor' | 'db' | 'debug' | 'visual', label: string) => {
@@ -812,6 +818,10 @@ class VerdictEditorElement extends HTMLElement {
               materialize: (s, cell) =>
                 materializeIdeCellPlaceholders(this.materializeInputs(s), cell, this.finvmState),
               onEmit: (cellId, value) => opts?.onEmit?.(cellId, value),
+              // Custom effect backend: a host fetch (CORS proxy) for runtime http
+              // and/or handler overrides; sandbox leaves both undefined.
+              fetchImpl: this.cfg.effects.kind === 'custom' ? this.cfg.effects.fetchImpl : undefined,
+              effectHandlers: this.cfg.effects.kind === 'custom' ? this.cfg.effects.handlers : undefined,
             },
             source,
             names,

@@ -1,3 +1,5 @@
+import { resolveLibUrl } from './libBase';
+
 export type CellOutput = {
   name: string;
   ok: boolean;
@@ -229,8 +231,9 @@ let notebookLibPromise: Promise<{
 }> | null = null;
 
 async function importPublicModule(url: string): Promise<any> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`failed to load ${url}: ${res.status}`);
+  const resolved = resolveLibUrl(url);
+  const res = await fetch(resolved);
+  if (!res.ok) throw new Error(`failed to load ${resolved}: ${res.status}`);
   const blobUrl = URL.createObjectURL(new Blob([await res.text()], { type: 'text/javascript' }));
   try {
     return await import(/* @vite-ignore */ blobUrl);
