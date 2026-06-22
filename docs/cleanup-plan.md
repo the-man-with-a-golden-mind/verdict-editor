@@ -100,7 +100,7 @@ Redesign so update correctness is *structural*, not re-derived per bug:
 
 This single redesign subsumes the scroll-jump, chart-zoom, chart-overlap, and
 spreadsheet-state fixes. The interim patches shipped for the release should be
-removed as part of it.
+removed as part of it. **Detailed design: `docs/output-renderer-design.md`.**
 
 ### H. The big strangler (separate, ongoing)
 Continue `NotebookMount.js` (~1600-line blob) → PureScript per the existing
