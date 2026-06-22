@@ -90,6 +90,22 @@ body {
   overflow: hidden;
 }
 
+/* Compact unfocused preview that is clipped: fade the bottom edge to signal
+   there is more code below (click the cell to expand to the full editor). */
+.notebook-cell-editor--clipped {
+  position: relative;
+}
+.notebook-cell-editor--clipped::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 26px;
+  background: linear-gradient(to bottom, transparent, rgb(2 6 23 / 0.92));
+  pointer-events: none;
+}
+
 .notebook-cell-editor--preview .notebook-cell-source-preview {
   max-height: inherit;
   white-space: pre;
@@ -276,19 +292,6 @@ body {
   overflow: visible;
 }
 
-.notebook-cell-editor-resizer,
-.notebook-cell-output-resizer {
-  height: 6px;
-  cursor: row-resize;
-  background: linear-gradient(to bottom, transparent, rgb(30 41 59 / 0.5), transparent);
-  flex-shrink: 0;
-}
-
-.notebook-cell-editor-resizer:hover,
-.notebook-cell-output-resizer:hover {
-  background: linear-gradient(to bottom, transparent, rgb(99 102 241 / 0.45), transparent);
-}
-
 .notebook-global-output-side {
   min-height: 3rem;
 }
@@ -315,11 +318,144 @@ body.notebook-resize-active * {
 }
 .notebook-stack-scroll::-webkit-scrollbar-thumb:hover { background: #64748b; background-clip: content-box; }
 
-/* Notebook: visible, easy-to-grab resize handles for input + output. */
+/* Notebook: visible, easy-to-grab resize handles for input + output. A taller
+   hit area (12px) with a centered grip line so it's obvious it can be dragged. */
 .notebook-cell-editor-resizer, .notebook-cell-output-resizer {
-  height: 8px; cursor: ns-resize; flex-shrink: 0;
-  background: linear-gradient(to bottom, transparent, rgba(71, 85, 105, 0.28));
+  height: 12px;
+  cursor: ns-resize;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(71, 85, 105, 0.18);
+}
+.notebook-cell-editor-resizer::after, .notebook-cell-output-resizer::after {
+  content: "";
+  width: 40px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(148, 163, 184, 0.55);
 }
 .notebook-cell-editor-resizer:hover, .notebook-cell-output-resizer:hover {
-  background: rgba(99, 102, 241, 0.40);
+  background: rgba(99, 102, 241, 0.28);
 }
+.notebook-cell-editor-resizer:hover::after, .notebook-cell-output-resizer:hover::after {
+  background: rgba(165, 180, 252, 0.95);
+}
+
+/* ============================================================================
+   Light theme — selected via the header toggle (adds `.theme-light` on <html>).
+   The IDE is authored dark with Tailwind utilities; this layer overrides the
+   common surface/text/border/accent utilities + CodeMirror for a light env
+   matching the landing page (white bg, dark text, emerald-green accent).
+   ============================================================================ */
+.theme-light body { background: #ffffff; }
+
+/* Surfaces */
+.theme-light .bg-\[\#0b0f1a\],
+.theme-light .bg-slate-950,
+.theme-light .bg-slate-950\/90,
+.theme-light .bg-slate-950\/80,
+.theme-light .bg-slate-950\/70,
+.theme-light .bg-slate-950\/60 { background-color: #ffffff !important; }
+.theme-light .bg-slate-900,
+.theme-light .bg-slate-900\/40,
+.theme-light .bg-slate-900\/60,
+.theme-light .bg-slate-900\/70,
+.theme-light .bg-slate-900\/80,
+.theme-light .bg-slate-800,
+.theme-light .bg-slate-800\/80,
+.theme-light .bg-slate-800\/60 { background-color: #f1f5f9 !important; }
+.theme-light .bg-\[\#0d1322\] { background-color: #f1f5f9 !important; }
+.theme-light .hover\:bg-slate-800:hover { background-color: #e2e8f0 !important; }
+
+/* Top header strip: white bar, dark text, defined bottom border. */
+.theme-light .hover\:text-white:hover { color: #0f172a !important; }
+.theme-light .from-violet-400 { --tw-gradient-from: #34d399 !important; }
+.theme-light .to-indigo-600 { --tw-gradient-to: #047857 !important; }
+
+/* Text */
+.theme-light .text-white,
+.theme-light .text-slate-100,
+.theme-light .text-slate-200,
+.theme-light .text-slate-300 { color: #0f172a !important; }
+.theme-light .text-slate-400,
+.theme-light .text-slate-500 { color: #475569 !important; }
+.theme-light .text-slate-600 { color: #94a3b8 !important; }
+
+/* Borders — clearly defined (near-black) on white, per request. */
+.theme-light .border-slate-800,
+.theme-light .border-slate-800\/80,
+.theme-light .border-slate-800\/60,
+.theme-light .border-slate-700,
+.theme-light .border-slate-700\/70,
+.theme-light .border-slate-700\/80,
+.theme-light .border-slate-600 { border-color: #475569 !important; }
+
+/* Action buttons: keep the colored fill/border, but the label must read black
+   (the light-green / light-red label text was unreadable on white). */
+.theme-light .text-emerald-200,
+.theme-light .text-emerald-100 { color: #0f172a !important; }
+.theme-light .text-rose-200,
+.theme-light .text-rose-100 { color: #9f1239 !important; }
+
+/* Accent: indigo -> emerald (landing-page green) */
+.theme-light .text-indigo-200,
+.theme-light .text-indigo-300 { color: #059669 !important; }
+.theme-light .border-indigo-400\/40,
+.theme-light .border-indigo-400\/50,
+.theme-light .border-indigo-400\/60,
+.theme-light .border-indigo-400\/70 { border-color: #34d399 !important; }
+.theme-light .bg-indigo-500\/10,
+.theme-light .bg-indigo-500\/20,
+.theme-light .bg-indigo-600\/30 { background-color: rgba(16, 185, 129, 0.14) !important; }
+
+/* CodeMirror */
+.theme-light .cm-editor { background: #ffffff !important; color: #0f172a !important; }
+.theme-light .cm-content { color: #0f172a !important; caret-color: #0f172a; }
+.theme-light .cm-gutters { background: #f8fafc !important; color: #94a3b8 !important; border-color: #e2e8f0 !important; }
+.theme-light .cm-activeLine, .theme-light .cm-activeLineGutter { background: rgba(16, 185, 129, 0.06) !important; }
+.theme-light .notebook-cell-source-preview { color: #1e293b !important; }
+
+/* Notebook cell focus + scrollbar */
+.theme-light .notebook-cell[data-cell-focused="1"] {
+  box-shadow: inset 4px 0 0 #10b981, 0 0 0 1px rgba(16, 185, 129, 0.25);
+}
+.theme-light .notebook-stack-scroll { scrollbar-color: #cbd5e1 transparent; }
+.theme-light .notebook-stack-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; }
+.theme-light .notebook-cell-editor--clipped::after {
+  background: linear-gradient(to bottom, transparent, rgba(255, 255, 255, 0.95));
+}
+
+/* Light theme: syntax tokens (static preview + highlightVerdictToHtml) need
+   dark, readable colors on the white background. */
+.theme-light .verdict-hl-keyword { color: #7c3aed; }
+.theme-light .verdict-hl-type { color: #0d9488; }
+.theme-light .verdict-hl-name { color: #1e293b; }
+.theme-light .verdict-hl-string { color: #b45309; }
+.theme-light .verdict-hl-number { color: #be185d; }
+.theme-light .verdict-hl-comment { color: #64748b; }
+.theme-light .verdict-hl-operator { color: #2563eb; }
+.theme-light .verdict-hl-bracket { color: #475569; }
+
+/* ── Visual tab (hylograph code-block view) ─────────────────────────────────
+   The block renderer uses bright pastel token classes tuned for a dark canvas
+   (text-*-200/300). On white they wash out — remap to readable dark tones, and
+   lighten the slate block backgrounds that weren't covered above. */
+.theme-light .text-emerald-300 { color: #047857 !important; }
+.theme-light .text-violet-200,
+.theme-light .text-purple-300 { color: #7c3aed !important; }
+.theme-light .text-amber-300,
+.theme-light .text-amber-200 { color: #b45309 !important; }
+.theme-light .text-cyan-300 { color: #0e7490 !important; }
+.theme-light .text-sky-300 { color: #0369a1 !important; }
+.theme-light .text-blue-300 { color: #1d4ed8 !important; }
+.theme-light .text-rose-300,
+.theme-light .text-rose-400 { color: #be123c !important; }
+.theme-light .bg-slate-950\/50,
+.theme-light .bg-slate-950\/40,
+.theme-light .bg-slate-950\/30 { background-color: #ffffff !important; }
+.theme-light .bg-slate-800\/40,
+.theme-light .bg-slate-700,
+.theme-light .bg-slate-700\/70 { background-color: #f1f5f9 !important; }
+.theme-light .bg-violet-600\/40 { background-color: rgba(124, 58, 237, 0.16) !important; }

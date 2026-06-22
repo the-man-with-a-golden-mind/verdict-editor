@@ -17,11 +17,13 @@ module Main
   , mountSpreadsheetViewExport
   , mountToolbarExport
   , mountGutterExport
+  , mountCellsNavExport
   , mountCellHeadExport
   , mountDiagnosticsExport
   , mountCodeFoldedBarExport
   , mountFoldedPreviewExport
   , routeEvalResultsExport
+  , cellViewPlanExport
   , main
   ) where
 
@@ -38,6 +40,8 @@ import Notebook
   , cellPreviewLine
   )
 import Notebook.CellChrome as CC
+import Notebook.CellsNav as CN
+import Notebook.CellView as CV
 import Notebook.Gutter as GT
 import Notebook.Model as NM
 import Notebook.Run as RN
@@ -131,6 +135,9 @@ mountToolbarExport = TB.mountToolbarExport
 mountGutterExport :: EffectFn2 Foreign GT.GutterProps Unit
 mountGutterExport = GT.mountGutterExport
 
+mountCellsNavExport :: EffectFn2 Foreign (Array CN.NavItem) Unit
+mountCellsNavExport = CN.mountCellsNavExport
+
 mountCellHeadExport :: EffectFn2 Foreign CC.HeadProps Unit
 mountCellHeadExport = CC.mountCellHeadExport
 
@@ -146,6 +153,9 @@ mountFoldedPreviewExport = CC.mountFoldedPreviewExport
 routeEvalResultsExport
   :: EffectFn4 (Array RN.RunCellInfo) (Array RN.EvalOut) Int String RN.RouteResult
 routeEvalResultsExport = RN.routeEvalResultsExport
+
+cellViewPlanExport :: EffectFn1 CV.CellViewInput CV.CellViewPlan
+cellViewPlanExport = mkEffectFn1 \input -> pure (CV.cellViewPlan input)
 
 renderDisplayIntoExport :: EffectFn3 Foreign Foreign Foreign Unit
 renderDisplayIntoExport = D.renderDisplayIntoExport

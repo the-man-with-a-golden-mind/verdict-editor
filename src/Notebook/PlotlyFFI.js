@@ -34,8 +34,27 @@ export function renderChartImpl(host) {
           const onY2 = t.axis === "y2" || t.yaxis === "y2";
           const base = { name: t.name ?? `series ${i + 1}`, x, y, yaxis: onY2 ? "y2" : "y" };
 
+          if (kind === "candlestick") {
+            // OHLC candles: x + open/high/low/close lists.
+            return {
+              name: t.name ?? `series ${i + 1}`,
+              x,
+              open: t.open ?? [],
+              high: t.high ?? [],
+              low: t.low ?? [],
+              close: t.close ?? [],
+              type: "candlestick",
+              yaxis: onY2 ? "y2" : "y",
+              increasing: { line: { color: t.color || "#34d399" } },
+              decreasing: { line: { color: "#f87171" } },
+            };
+          }
+          if (kind === "histogram") {
+            // Distribution of values (x = the samples).
+            return { ...base, type: "histogram", marker: { color }, opacity: t.opacity ?? 0.78 };
+          }
           if (kind === "bar") {
-            return { ...base, type: "bar", marker: { color, line: { width: 0 } }, opacity: 0.85 };
+            return { ...base, type: "bar", marker: { color, line: { width: 0 } }, opacity: t.opacity ?? 0.85 };
           }
           const isArea = kind === "area";
           const isStep = kind === "step";
@@ -63,12 +82,18 @@ export function renderChartImpl(host) {
             ...base,
             type: "scatter",
             mode: "lines",
-            line: { color, width: isStep ? 2.5 : 2, shape: isStep ? "hv" : "spline" },
+            line: {
+              color,
+              width: Number.isFinite(t.width) ? t.width : isStep ? 2.5 : 2,
+              shape: isStep ? "hv" : "spline",
+              dash: t.dash || "solid",
+            },
+            opacity: Number.isFinite(t.opacity) ? t.opacity : 1,
             hovertemplate: `bar %{x}<br>%{y:,}<extra>${t.name ?? ""}</extra>`,
           };
           if (isArea) {
             trace.fill = "tozeroy";
-            trace.fillcolor = withAlpha(color, 0.22);
+            trace.fillcolor = withAlpha(color, Number.isFinite(t.opacity) ? t.opacity : 0.22);
           }
           return trace;
         });
@@ -96,15 +121,23 @@ export function renderChartImpl(host) {
           }
         }
 
+        // Theme-aware palette: charts follow the IDE light/dark theme (class on
+        // <html>) so they don't stay dark on a light page.
+        const lightTheme =
+          typeof document !== "undefined" && document.documentElement.classList.contains("theme-light");
+        const T = lightTheme
+          ? { paper: "#ffffff", plot: "#f8fafc", font: "#0f172a", grid: "#e2e8f0", zero: "#cbd5e1", line: "#cbd5e1", tick: "#475569", spike: "#94a3b8", hover: "#f1f5f9", hoverBorder: "#cbd5e1" }
+          : { paper: "#0b0f1a", plot: "#0d1322", font: "#e2e8f0", grid: "#1e293b", zero: "#243049", line: "#243049", tick: "#94a3b8", spike: "#64748b", hover: "#0f172a", hoverBorder: "#334155" };
+
         const axisBase = {
-          gridcolor: "#1e293b",
-          zerolinecolor: "#243049",
-          linecolor: "#243049",
-          tickfont: { size: 10, color: "#94a3b8" },
+          gridcolor: T.grid,
+          zerolinecolor: T.zero,
+          linecolor: T.line,
+          tickfont: { size: 10, color: T.tick },
           showspikes: true,
           spikethickness: 1,
           spikedash: "dot",
-          spikecolor: "#64748b",
+          spikecolor: T.spike,
           spikemode: "across",
         };
 
@@ -119,18 +152,23 @@ export function renderChartImpl(host) {
           title: titleText
             ? {
                 text: titleText,
-                font: { size: compact ? 11 : 14, color: "#e2e8f0" },
+                font: { size: compact ? 11 : 14, color: T.font },
                 pad: { t: 8, b: 4 },
                 x: 0,
                 xanchor: "left",
               }
             : "",
-          paper_bgcolor: "#0b0f1a",
-          plot_bgcolor: "#0d1322",
-          font: { color: "#e2e8f0", family: "JetBrains Mono, monospace", size: 11 },
+          paper_bgcolor: T.paper,
+          plot_bgcolor: T.plot,
+          font: { color: T.font, family: "JetBrains Mono, monospace", size: 11 },
           hovermode: "x unified",
-          hoverlabel: { bgcolor: "#0f172a", bordercolor: "#334155", font: { size: 11 } },
+          hoverlabel: { bgcolor: T.hover, bordercolor: T.hoverBorder, font: { size: 11 } },
           dragmode: "pan",
+          // Preserve the viewer's zoom/pan/legend across live data updates: as long
+          // as this is unchanged between Plotly.react calls on the same element,
+          // Plotly keeps the current axis range instead of snapping to autorange.
+          // Keyed by title so a genuinely different chart in the slot resets cleanly.
+          uirevision: titleText || "verdict",
           showlegend: traces.length > 1,
           legend: {
             orientation: "h",
@@ -144,10 +182,14 @@ export function renderChartImpl(host) {
           xaxis: {
             ...axisBase,
             title: { text: spec?.xaxis?.title ?? "", font: { size: 10, color: "#64748b" } },
+            ...(spec?.xaxis?.type === "log" ? { type: "log" } : {}),
+            ...(Array.isArray(spec?.xaxis?.range) ? { range: spec.xaxis.range, autorange: false } : {}),
           },
           yaxis: {
             ...axisBase,
             title: { text: spec?.yaxis?.title ?? "", font: { size: 10, color: "#64748b" } },
+            ...(spec?.yaxis?.type === "log" ? { type: "log" } : {}),
+            ...(Array.isArray(spec?.yaxis?.range) ? { range: spec.yaxis.range, autorange: false } : {}),
           },
         };
         if (hasY2) {

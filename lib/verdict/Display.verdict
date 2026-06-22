@@ -1,4 +1,4 @@
-module Display exposing (dText, dTrace, dLine, dArea, dStep, dMarkers, dChart, dChartY, dChartY2, dStack, dRow, dCol, dTable)
+module Display exposing (dText, dTrace, dLine, dArea, dStep, dMarkers, dBar, dScatter, dLineW, dHistogram, dCandles, dChart, dChartY, dChartY2, dChartLog, dStack, dRow, dCol, dTable)
 
 -- Display: build rich notebook output (Plotly charts, text, tables, and
 -- row/col/stack layouts) as Json. Each constructor returns a small record that
@@ -30,6 +30,29 @@ dStep name xs ys color = dTrace(name, "step", xs, ys, "y", color, "")
 dMarkers : String -> List Int -> List Int -> String -> String -> Json
 dMarkers name xs ys color symbol = dTrace(name, "markers", xs, ys, "y", color, symbol)
 
+-- A bar series.
+dBar : String -> List Int -> List Int -> String -> Json
+dBar name xs ys color = dTrace(name, "bar", xs, ys, "y", color, "")
+
+-- Scatter points (symbol e.g. "circle" | "diamond" | "square").
+dScatter : String -> List Int -> List Int -> String -> String -> Json
+dScatter name xs ys color symbol = dTrace(name, "scatter", xs, ys, "y", color, symbol)
+
+-- A line with explicit width (px) and dash ("solid"|"dot"|"dash"|"dashdot").
+dLineW : String -> List Int -> List Int -> String -> Int -> String -> Json
+dLineW name xs ys color width dash =
+  { name = name, kind = "line", x = xs, y = ys, axis = "y", color = color, symbol = "", width = width, dash = dash }
+
+-- A histogram of a list of sample values.
+dHistogram : String -> List Int -> String -> Json
+dHistogram name values color =
+  { name = name, kind = "histogram", x = values, axis = "y", color = color, symbol = "" }
+
+-- An OHLC candlestick series (x, opens, highs, lows, closes).
+dCandles : String -> List Int -> List Int -> List Int -> List Int -> List Int -> Json
+dCandles name xs opens highs lows closes =
+  { name = name, kind = "candlestick", x = xs, open = opens, high = highs, low = lows, close = closes, axis = "y", color = "" }
+
 -- Charts. -------------------------------------------------------------------
 
 -- A chart from a title and a list of traces.
@@ -45,6 +68,11 @@ dChartY title traces xlabel ylabel =
 dChartY2 : String -> List Json -> String -> String -> String -> Json
 dChartY2 title traces xlabel ylabel y2label =
   { kind = "chart", title = title, traces = traces, xaxis = { title = xlabel }, yaxis = { title = ylabel }, yaxis2 = { title = y2label } }
+
+-- A chart with a log-scale y axis (e.g. for prices/equity over long ranges).
+dChartLog : String -> List Json -> String -> String -> Json
+dChartLog title traces xlabel ylabel =
+  { kind = "chart", title = title, traces = traces, xaxis = { title = xlabel }, yaxis = { title = ylabel, type = "log" } }
 
 -- Layout containers. --------------------------------------------------------
 

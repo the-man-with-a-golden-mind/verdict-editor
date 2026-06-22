@@ -17,20 +17,42 @@ export {
   mountSpreadsheetViewExport,
   mountToolbarExport,
   mountGutterExport,
+  mountCellsNavExport,
   mountCellHeadExport,
   mountDiagnosticsExport,
   mountCodeFoldedBarExport,
   mountFoldedPreviewExport,
   routeEvalResultsExport,
+  cellViewPlanExport,
 } from "./output/Main/index.js";
 
 export { decodeDisplay, renderDisplayInto } from "./Display.js";
+
+// Pure cell-VIEW decision logic (PureScript Notebook.CellView via NotebookPs.js).
+// Re-exported through the bundle so tests/tooling can reach the thin JS wrapper.
+export { cellViewPlan } from "./output/Main/NotebookPs.js";
+
+// Pure cell-project logic (PureScript Notebook.Project via its JS adapter). Re-
+// exported so tooling/tests can reach it through the committed bundle rather
+// than the source tree's build-only output layout.
+export {
+  buildNotebookProgramSource,
+  buildRunnableCellSource,
+  cellModuleName,
+  importModuleNames,
+  inferCellRole,
+  isModuleCell,
+  isRunnableCell,
+  normalizeCellMeta,
+  projectCellLabel,
+} from "./output/Main/NotebookProject.js";
 
 import { registerPsMountTable } from "./Spreadsheet.js";
 import {
   mountSpreadsheetViewExport,
   mountToolbarExport as psMountToolbar,
   mountGutterExport as psMountGutter,
+  mountCellsNavExport as psMountCellsNav,
   mountCellHeadExport as psMountCellHead,
   mountDiagnosticsExport as psMountDiagnostics,
   mountCodeFoldedBarExport as psMountCodeFoldedBar,
@@ -55,6 +77,10 @@ globalThis.__notebookMountToolbar = (host, props) => psMountToolbar(host, props)
 // Mount the PureScript ps-spa cell gutter into `host` (the gutter container).
 // Props carry fold/run state from the Model + JS action thunks (Effect Unit).
 globalThis.__notebookMountGutter = (host, props) => psMountGutter(host, props);
+
+// Mount the PureScript ps-spa Cells navigation into `host`. Items carry the
+// display fields + JS action thunks (onNav/onRun/onStop) per cell.
+globalThis.__notebookMountCellsNav = (host, items) => psMountCellsNav(host, items);
 
 // Cell-chrome ps-spa pieces (Model-derived, presentational). Editor + output
 // hosts stay JS-managed (live CodeMirror / Plotly instances).

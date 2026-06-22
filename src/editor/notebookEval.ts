@@ -203,7 +203,41 @@ function wrapBindingAsMain(src: string, bindingName: string): string {
     .replace(new RegExp(`\\b${escaped}\\b`, 'g'), 'main');
 }
 
+// Compiled programs are pure functions of (source, bindingName). The notebook
+// re-evaluates the same cell repeatedly (manual re-runs, loops) with unchanged
+// source, so cache the compiled output and skip recompilation until the source
+// actually changes. Keyed by the fully materialized source (inputs included),
+// so any edit or input change is a cache miss. Bounded LRU to cap memory.
+const compileCache = new Map<
+  string,
+  { ok: true; output: string; entry: string } | { ok: false; error: string }
+>();
+const COMPILE_CACHE_MAX = 48;
+
 function compileNotebookProgram(
+  vlib: VerdictLib,
+  src: string,
+  bindingName?: string,
+): { ok: true; output: string; entry: string } | { ok: false; error: string } {
+  const key = `${bindingName ?? ''} ${src}`;
+  const hit = compileCache.get(key);
+  if (hit) {
+    compileCache.delete(key);
+    compileCache.set(key, hit); // LRU bump
+    return hit;
+  }
+  const result = compileNotebookProgramUncached(vlib, src, bindingName);
+  // Cache successes always; cache failures too (a broken cell stays broken until
+  // edited, and recompiling it every tick to re-derive the same error is wasteful).
+  compileCache.set(key, result);
+  if (compileCache.size > COMPILE_CACHE_MAX) {
+    const oldest = compileCache.keys().next().value;
+    if (oldest !== undefined) compileCache.delete(oldest);
+  }
+  return result;
+}
+
+function compileNotebookProgramUncached(
   vlib: VerdictLib,
   src: string,
   bindingName?: string,
@@ -236,6 +270,9 @@ async function runBindingOnFinvm(
   effectStorage: EffectStorage,
   sourceSig: string,
   signal?: AbortSignal,
+  onEmit?: (value: unknown) => void,
+  fetchImpl?: typeof fetch,
+  handlerOverrides?: Record<string, (payload: any) => unknown | Promise<unknown>>,
 ): Promise<{ ok: true; result: unknown; finvmState: Record<string, unknown> } | { ok: false; error: string }> {
   try {
     const program = JSON.parse(programJson) as {
@@ -254,7 +291,7 @@ async function runBindingOnFinvm(
       state: userState,
       machineSnapshot: snapshot,
       entryFunction: bindingName,
-      handlers: createFinvmHandlers(effectStorage, undefined, signal),
+      handlers: createFinvmHandlers(effectStorage, fetchImpl, signal, onEmit, handlerOverrides),
     });
     if (!vmOut.ok) return { ok: false, error: vmOut.error };
     const dbState = effectDbTablesToFinvmState(effectStorage.listDbTables());
@@ -278,6 +315,12 @@ export type NotebookEvalContext = {
   getEffectStorage: () => EffectStorage;
   setEffectStorage: (s: EffectStorage) => void;
   materialize: (source: string, cell?: { id?: string; index?: number }) => string;
+  /** Render a Display value emitted live by a running cell to its output. */
+  onEmit?: (cellId: string | undefined, value: unknown) => void;
+  /** Custom effect backend (sandbox uses neither): a fetch for runtime http
+   *  effects (e.g. a CORS proxy) and/or handler overrides merged over built-ins. */
+  fetchImpl?: typeof fetch;
+  effectHandlers?: Record<string, (payload: any) => unknown | Promise<unknown>>;
 };
 
 export type NotebookEvalOptions = {
@@ -357,6 +400,9 @@ export async function evalNotebookCells(
       storage,
       srcSig,
       opts?.signal,
+      ctx.onEmit ? (value) => ctx.onEmit!(opts?.cell?.id, value) : undefined,
+      ctx.fetchImpl,
+      ctx.effectHandlers,
     );
     if (!run.ok) {
       outputs.push({ name, ok: false, typeSig: sigOf(name), error: run.error });
@@ -398,6 +444,13 @@ export function wrapVerdictLibForNotebook(
       : {}),
     ...(notebookLib.evalBindingsJsonJS
       ? { evalBindingsJsonJS: notebookLib.evalBindingsJsonJS.bind(notebookLib) }
+      : {}),
+    // Diagnostics must use the notebook lib's compiler too: it links the Verdict
+    // libraries (CellBus, Loop, Display, Actor, IDE) the same way the run path
+    // does. The base verdict.mjs diagnosticsJS does not, so cells importing those
+    // libraries (e.g. busQueue/loopEvery) would show false "unknown name" errors.
+    ...(notebookLib.diagnosticsJS
+      ? { diagnosticsJS: notebookLib.diagnosticsJS.bind(notebookLib) }
       : {}),
   };
 }

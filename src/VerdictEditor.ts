@@ -12,6 +12,7 @@ import {
   runProgramWithEffects,
   type EffectStorage,
 } from './editor/effectDriver';
+import { FinvmWorkerClient } from './editor/finvmClient';
 import {
   escapeHtml,
   extractDbTables,
@@ -25,8 +26,6 @@ import {
   createNotebookBridge,
   loadNotebookDisplayRenderer,
   loadNotebookLib,
-  loadVnbFromStorage,
-  saveVnbToStorage,
   type CellsNavSection,
   type NotebookApi,
   type NotebookBridge,
@@ -38,9 +37,16 @@ import {
 } from './editor/notebookEval';
 import { bindingNamesInCell as resolveNotebookBindingNames } from './editor/notebookBindings';
 import { materializeIdeCellPlaceholders } from './editor/ideSession';
-import { DEFAULT_NOTEBOOK_DECISION_CELL_LINES } from './editor/defaultNotebookDecisionCell.mjs';
-import { DEFAULT_NOTEBOOK_SIM_CELL_LINES } from './editor/defaultNotebookSimCell.mjs';
-import defaultMarketSource from '../lib/verdict/Market.verdict?raw';
+import { blankNotebookDoc, type NotebookDoc } from './editor/notebookSeed';
+import { resolveLibUrl, setLibBase } from './editor/libBase';
+import {
+  rawConfigForElement,
+  resolveEditorConfig,
+  type EditorConfig,
+  type InputFieldSpec,
+  type ResolvedEditorConfig,
+} from './editor/editorConfig';
+import { financeConfig } from './editor/templates/finance';
 import { extractDocs, gasFromBytecode, renderCallGraph, type GasInfo } from './editor/vizGraph';
 import {
   collapsedDefKey,
@@ -60,34 +66,7 @@ declare global {
 // Shared monospace stack for every editor surface in the app.
 const FONT_MONO = "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
 
-/** Bump when default notebook cells change so stale localStorage is not reused. */
-const VNB_FORMAT_VERSION = 3;
-
-type NotebookSeedCell = {
-  source: string;
-  kind?: 'code' | 'wysiwyg';
-  role?: 'runnable' | 'module' | 'asset' | 'note';
-  path?: string;
-  moduleName?: string;
-};
-
-function notebookSeedFromCells(cells: Array<string | NotebookSeedCell>): string {
-  const normalized = cells.map((cell) => typeof cell === 'string' ? { source: cell } : cell);
-  const joined = normalized.map((c) => c.source.trim()).filter(Boolean).join('\n\n');
-  let h = 5381;
-  for (let i = 0; i < joined.length; i++) h = ((h << 5) + h + joined.charCodeAt(i)) | 0;
-  return JSON.stringify({
-    formatVersion: VNB_FORMAT_VERSION,
-    seedSig: `${joined.length}:${h >>> 0}`,
-    cells: normalized.map((cell) => ({
-      kind: cell.kind ?? 'code',
-      role: cell.role,
-      path: cell.path,
-      moduleName: cell.moduleName,
-      source: cell.source,
-    })),
-  });
-}
+// Notebook-seed helpers moved to ./editor/notebookSeed (shared with templates).
 
 // Base classes for the editor status bar; setStatus appends the state colour.
 const STATUS_BASE = 'flex h-7 shrink-0 items-center gap-1.5 px-4 text-xs font-mono bg-slate-950 border-t border-slate-800';
@@ -132,8 +111,9 @@ let libsPromise: Promise<void> | null = null;
 // while still giving us the module's named exports. The blob is self-contained
 // (no bare imports), so a blob-URL import resolves with nothing else to fetch.
 async function importPublicModule(url: string): Promise<any> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`failed to load ${url}: ${res.status}`);
+  const resolved = resolveLibUrl(url);
+  const res = await fetch(resolved);
+  if (!res.ok) throw new Error(`failed to load ${resolved}: ${res.status}`);
   const blobUrl = URL.createObjectURL(
     new Blob([await res.text()], { type: 'text/javascript' }),
   );
@@ -266,12 +246,13 @@ class VerdictEditorElement extends HTMLElement {
   private sourceToggleBtn: HTMLButtonElement | null = null;
   private resizeCleanup: (() => void) | null = null;
   private statusBar!: HTMLDivElement;
-  private symbolInput: HTMLInputElement | null = null;
-  private assetsCsvInput: HTMLInputElement | null = null;
-  private signalThresholdInput: HTMLInputElement | null = null;
-  private positionBiasInput: HTMLInputElement | null = null;
-  private telegramBotTokenInput: HTMLInputElement | null = null;
-  private telegramChatIdInput: HTMLInputElement | null = null;
+  /** Host config (set by a host before connect, or via the global registry). */
+  config?: EditorConfig;
+  private cfg!: ResolvedEditorConfig;
+  /** Notebook-wide input fields, keyed by spec.key (config-driven). */
+  private runtimeInputEls = new Map<string, HTMLInputElement>();
+  /** Document pre-loaded from the storage adapter before mount (null = use seed). */
+  private loadedDoc: NotebookDoc | null = null;
   private runToggleBtn: HTMLButtonElement | null = null;
   private liveIntervalInput: HTMLInputElement | null = null;
   // Live loop: when active, re-run every cell every `liveIntervalMs`. Each tick
@@ -287,6 +268,10 @@ class VerdictEditorElement extends HTMLElement {
   private busyCount = 0;
   private finvmState: Record<string, unknown> = {};
   private effectStorage: EffectStorage | null = null;
+  private finvmWorker: FinvmWorkerClient | null = null;
+  private finvmWorkerFailed = false;
+  private dbDebugPollTimer: number | null = null;
+  private themeToggleBtn: HTMLButtonElement | null = null;
   private languageAnalysisSig = '';
   private languageAnalysis = {
     diagnostics: [] as VerdictDiagnostic[],
@@ -319,6 +304,10 @@ class VerdictEditorElement extends HTMLElement {
   connectedCallback() {
     if (this.built) return;
     this.built = true;
+    // Point the lazy /lib/*.mjs loaders at the host's base URL (if any) BEFORE
+    // the first fetch. Libs are global singletons, so the first element wins.
+    const libBaseUrl = rawConfigForElement(this)?.libBaseUrl;
+    if (libBaseUrl) setLibBase(libBaseUrl);
     // Start fetching the compiler/VM blobs as early as possible, in parallel
     // with building the DOM and CodeMirror editors.
     loadVerdictLibs();
@@ -326,6 +315,11 @@ class VerdictEditorElement extends HTMLElement {
   }
 
   private async build() {
+    // Resolve host config: explicit `.config` property or the global registry
+    // (data-config-id), falling back to the finance template so the standalone
+    // app keeps its demo notebook. Embedders pass their own config.
+    this.cfg = resolveEditorConfig(rawConfigForElement(this) ?? financeConfig());
+
     this.style.display = 'block';
     this.style.width = '100%';
     this.style.height = '100%';
@@ -343,7 +337,7 @@ class VerdictEditorElement extends HTMLElement {
     this.container.className = 'flex-1 min-h-0';
 
     // A small editor-pane header and main tabs (Notebook / DB / Visual / Debug).
-    const editorHeader = sectionHeader('Workspace', 'Main.verdict');
+    const editorHeader = sectionHeader(this.cfg.branding.title ?? 'Workspace', 'Main.verdict');
     const mainTabBar = document.createElement('div');
     mainTabBar.className = 'flex items-center gap-1 border-b border-slate-800 bg-slate-950 px-2 py-1.5';
     const mkMainTabBtn = (id: 'editor' | 'db' | 'debug' | 'visual', label: string) => {
@@ -371,6 +365,16 @@ class VerdictEditorElement extends HTMLElement {
       this.notebookBridgeRef?.setSourceMode(!this.notebookSourceMode);
     };
     mainTabBar.appendChild(this.sourceToggleBtn);
+
+    // Theme picker (light/dark) for the whole environment. Persisted; applied as
+    // a class on <html> so the CSS layer can retheme every surface.
+    this.themeToggleBtn = document.createElement('button');
+    this.themeToggleBtn.type = 'button';
+    this.themeToggleBtn.className =
+      'ml-1 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-300 hover:border-indigo-400/50 hover:text-white';
+    this.themeToggleBtn.onclick = () =>
+      this.setTheme(!document.documentElement.classList.contains('theme-light'));
+    mainTabBar.appendChild(this.themeToggleBtn);
 
     this.statusBar = document.createElement('div');
     this.statusBar.className = STATUS_BASE + ' text-slate-500';
@@ -586,7 +590,7 @@ class VerdictEditorElement extends HTMLElement {
     this.cellsPanel.className = 'flex flex-1 min-h-0 overflow-auto bg-[#0b0f1a] p-3';
     this.cellsNavHost = document.createElement('div');
     this.cellsNavHost.dataset.cellsNav = '1';
-    this.cellsNavHost.className = 'flex flex-col gap-1.5';
+    this.cellsNavHost.className = 'flex w-full flex-col gap-1.5';
     this.cellsNavHost.innerHTML =
       '<div class="text-xs italic text-slate-600">Per-cell navigation. Inputs and DB are shared across the notebook.</div>';
     this.cellsPanel.appendChild(this.cellsNavHost);
@@ -607,52 +611,28 @@ class VerdictEditorElement extends HTMLElement {
       l.textContent = text;
       return l;
     };
-    this.symbolInput = document.createElement('input');
-    this.symbolInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
-    this.symbolInput.value = 'BTCUSD';
-    this.symbolInput.setAttribute('aria-label', 'Binance symbol');
-    this.symbolInput.oninput = () => this.onRuntimeInputsChanged();
-    this.assetsCsvInput = document.createElement('input');
-    this.assetsCsvInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
-    this.assetsCsvInput.value = 'BTCUSD,ETHUSD,ADAUSD';
-    this.assetsCsvInput.setAttribute('aria-label', 'Assets CSV');
-    this.assetsCsvInput.oninput = () => this.onRuntimeInputsChanged();
-    this.signalThresholdInput = document.createElement('input');
-    this.signalThresholdInput.type = 'number';
-    this.signalThresholdInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
-    this.signalThresholdInput.value = '2';
-    this.signalThresholdInput.setAttribute('aria-label', 'Signal threshold');
-    this.signalThresholdInput.oninput = () => this.onRuntimeInputsChanged();
-    this.positionBiasInput = document.createElement('input');
-    this.positionBiasInput.type = 'number';
-    this.positionBiasInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
-    this.positionBiasInput.value = '0';
-    this.positionBiasInput.setAttribute('aria-label', 'Position bias');
-    this.positionBiasInput.oninput = () => this.onRuntimeInputsChanged();
-    this.telegramBotTokenInput = document.createElement('input');
-    this.telegramBotTokenInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
-    this.telegramBotTokenInput.value = '';
-    this.telegramBotTokenInput.placeholder = '123456:ABC...';
-    this.telegramBotTokenInput.setAttribute('aria-label', 'Telegram bot token');
-    this.telegramBotTokenInput.oninput = () => this.onRuntimeInputsChanged();
-    this.telegramChatIdInput = document.createElement('input');
-    this.telegramChatIdInput.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
-    this.telegramChatIdInput.value = '';
-    this.telegramChatIdInput.placeholder = '-100123456789';
-    this.telegramChatIdInput.setAttribute('aria-label', 'Telegram chat id');
-    this.telegramChatIdInput.oninput = () => this.onRuntimeInputsChanged();
-    fixedInputs.appendChild(mkLabel('symbol'));
-    fixedInputs.appendChild(this.symbolInput);
-    fixedInputs.appendChild(mkLabel('assetsCsv'));
-    fixedInputs.appendChild(this.assetsCsvInput);
-    fixedInputs.appendChild(mkLabel('signalThreshold'));
-    fixedInputs.appendChild(this.signalThresholdInput);
-    fixedInputs.appendChild(mkLabel('positionBias'));
-    fixedInputs.appendChild(this.positionBiasInput);
-    fixedInputs.appendChild(mkLabel('telegramBotToken'));
-    fixedInputs.appendChild(this.telegramBotTokenInput);
-    fixedInputs.appendChild(mkLabel('telegramChatId'));
-    fixedInputs.appendChild(this.telegramChatIdInput);
+    // Config-driven notebook-wide inputs. Each spec becomes a labelled field;
+    // the finance template supplies the original 9, but a host can pass any set.
+    this.runtimeInputEls.clear();
+    for (const spec of this.cfg.inputs) {
+      const input = document.createElement('input');
+      if (spec.type === 'number') input.type = 'number';
+      input.className = 'w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] font-mono text-slate-300 outline-none focus:border-indigo-400';
+      input.value = spec.default != null ? String(spec.default) : '';
+      if (spec.placeholder) input.placeholder = spec.placeholder;
+      if (spec.title) input.title = spec.title;
+      input.setAttribute('aria-label', spec.label ?? spec.key);
+      input.oninput = () => this.onRuntimeInputsChanged();
+      this.runtimeInputEls.set(spec.key, input);
+      fixedInputs.appendChild(mkLabel(spec.label ?? spec.key));
+      fixedInputs.appendChild(input);
+    }
+    if (this.cfg.inputs.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'col-span-2 text-[11px] italic text-slate-600';
+      empty.textContent = 'No fixed inputs configured. Add custom inputs below.';
+      fixedInputs.appendChild(empty);
+    }
 
     const dynamicInputs = document.createElement('div');
     dynamicInputs.className = 'rounded border border-slate-800 bg-slate-950 p-2';
@@ -701,6 +681,7 @@ class VerdictEditorElement extends HTMLElement {
     this.mainContainer.appendChild(rightPanel);
 
     this.appendChild(this.mainContainer);
+    this.initTheme();
 
     this.container.classList.add('verdict-cm-shell-wrap', 'min-h-0', 'flex-1');
 
@@ -711,35 +692,15 @@ class VerdictEditorElement extends HTMLElement {
       fontSize: 12,
     });
 
-    const DEFAULT_NOTEBOOK_CELL_2 = DEFAULT_NOTEBOOK_SIM_CELL_LINES;
-    const defaultNotebookCells = [
-      {
-        source: defaultMarketSource.trim(),
-        kind: 'code' as const,
-        role: 'module' as const,
-        path: 'Market.verdict',
-        moduleName: 'Market',
-      },
-      {
-        source: DEFAULT_NOTEBOOK_DECISION_CELL_LINES.join('\n'),
-        kind: 'code' as const,
-        role: 'runnable' as const,
-        path: 'Main.verdict',
-        moduleName: 'Main',
-      },
-      {
-        source: DEFAULT_NOTEBOOK_CELL_2.join('\n'),
-        kind: 'code' as const,
-        role: 'runnable' as const,
-        path: 'Backtest.verdict',
-        moduleName: 'Backtest',
-      },
-    ];
-    this.defaultNotebookSeed = notebookSeedFromCells(defaultNotebookCells);
+    // The cold-start document comes from config (finance template by default,
+    // a host-supplied doc when embedded, or a blank doc for a generic editor).
+    const defaultDoc = this.cfg.defaultDocument ?? blankNotebookDoc();
+    this.defaultNotebookSeed = JSON.stringify(defaultDoc);
+    const defaultProgramSource = defaultDoc.cells.map((cell) => cell.source.trim()).join('\n\n');
 
     this.editor = createVerdictEditor(this.container, {
       variant: 'program',
-      value: defaultNotebookCells.map((cell) => cell.source).join('\n\n'),
+      value: defaultProgramSource,
       languageService: this.programLanguageService(),
       onRun: () => this.run(),
       onChange: () => this.scheduleUpdate(),
@@ -792,6 +753,14 @@ class VerdictEditorElement extends HTMLElement {
     if (this.isDebugView() || !this.notebookHost) return;
     try {
       await loadAstLib();
+      // Load the host's saved document for this notebook id (async) before mount;
+      // the bridge then serves it synchronously and the default seed is the fallback.
+      this.loadedDoc = await this.cfg.storage
+        .load(this.cfg.notebookId)
+        .catch((e) => {
+          console.error('Notebook load failed:', e);
+          return null;
+        });
       this.renderNotebookDisplay = await loadNotebookDisplayRenderer();
       const bridge = createNotebookBridge({
         vlib,
@@ -800,6 +769,37 @@ class VerdictEditorElement extends HTMLElement {
         syncCellsNav: (sections) => this.syncNotebookCellsNav(sections),
         evalCells: async (source, names, opts) => {
           if (!vlib || !finvmLib) return [];
+          // Run the (CPU-bound) cell eval on a worker so heavy actor ticks don't
+          // freeze the UI. Materialize on the main thread first (DOM inputs + cell
+          // placeholders); the worker treats the source as final.
+          // A host-provided effect backend lives on the main thread, so a
+          // custom config bypasses the worker and runs the main-thread path
+          // (which can read/write the configured EffectStorage). 'sandbox' (the
+          // default) keeps the in-memory worker.
+          const worker = this.cfg.effects.kind === 'sandbox' ? this.ensureFinvmWorker() : null;
+          if (worker) {
+            const matSrc = materializeIdeCellPlaceholders(
+              this.materializeInputs(source),
+              { id: opts?.cellId, index: opts?.cellIndex },
+              this.finvmState,
+            );
+            try {
+              const { outputs, dbTables } = await worker.evalCells(matSrc, names, opts);
+              // Keep the DB tab's source current from the worker's snapshot; fetch
+              // the full VM snapshot only when the Debug tab is actually open.
+              if (dbTables) this.finvmState = { ...this.finvmState, '__finvm.db': dbTables };
+              if (this.activeMainTab === 'db') this.refreshDbQueryOutput();
+              if (this.activeMainTab === 'debug') {
+                this.finvmState = await worker.getFinvmState();
+                this.renderVmState(this.finvmState);
+              }
+              return outputs;
+            } catch {
+              this.finvmWorkerFailed = true;
+              this.finvmWorker = null;
+              // fall through to the main-thread path
+            }
+          }
           const outs = await evalNotebookCells(
             {
               vlib,
@@ -808,12 +808,20 @@ class VerdictEditorElement extends HTMLElement {
               setFinvmState: (s) => {
                 this.finvmState = s;
               },
-              getEffectStorage: () => this.effectStorage ?? createEffectStorage(),
+              getEffectStorage: () =>
+                (this.cfg.effects.kind === 'custom' ? this.cfg.effects.storage : undefined) ??
+                this.effectStorage ??
+                createEffectStorage(),
               setEffectStorage: (s) => {
                 this.effectStorage = s;
               },
               materialize: (s, cell) =>
                 materializeIdeCellPlaceholders(this.materializeInputs(s), cell, this.finvmState),
+              onEmit: (cellId, value) => opts?.onEmit?.(cellId, value),
+              // Custom effect backend: a host fetch (CORS proxy) for runtime http
+              // and/or handler overrides; sandbox leaves both undefined.
+              fetchImpl: this.cfg.effects.kind === 'custom' ? this.cfg.effects.fetchImpl : undefined,
+              effectHandlers: this.cfg.effects.kind === 'custom' ? this.cfg.effects.handlers : undefined,
             },
             source,
             names,
@@ -855,8 +863,12 @@ class VerdictEditorElement extends HTMLElement {
           }));
           return mapDiagnosticsToCells(diags, refs);
         },
-        loadDocument: () => loadVnbFromStorage(),
-        saveDocument: (doc) => saveVnbToStorage(doc),
+        loadDocument: () => this.loadedDoc,
+        saveDocument: (doc) => {
+          void this.cfg.storage
+            .save(this.cfg.notebookId, doc)
+            .catch((e) => console.error('Notebook save failed:', e));
+        },
         bindingNamesInCell: (cellId, cells, source) =>
           resolveNotebookBindingNames(
             cellId,
@@ -887,10 +899,50 @@ class VerdictEditorElement extends HTMLElement {
     this.renderCellsNav(sections);
   }
 
-  /** Cells tab: navigation minimap — number, preview, run/stop, status. */
+  /** Cells tab: navigation minimap — number, name, run/stop, status. Rendered by
+   * the PureScript ps-spa component (Notebook.CellsNav); the imperative block
+   * below is a fallback if that mount isn't available. */
   private renderCellsNav(sections: CellsNavSection[]) {
     const host = this.cellsNavHost;
     if (!host) return;
+    const mount = (globalThis as Record<string, unknown>).__notebookMountCellsNav as
+      | ((h: HTMLElement, items: unknown[]) => void)
+      | undefined;
+    if (typeof mount === 'function') {
+      const items = sections.map((sec) => {
+        const label =
+          sec.kind === 'module' ? 'Module' : sec.kind === 'text' ? 'Text' : sec.kind === 'asset' ? 'Asset' : 'Runnable';
+        return {
+          cellId: sec.cellId,
+          meta: `${sec.cellIndex + 1} · ${label}`,
+          name: (sec.name ?? '').trim(),
+          isRunnable: sec.kind === 'code',
+          running: !!sec.running,
+          focused: !!sec.focused,
+          status: sec.running ? 'running' : sec.hasOutput ? 'ok' : 'idle',
+          onNav: () => {
+            if (this.activeMainTab === 'visual' && this.revealVisualCell(sec.cellId)) return;
+            this.notebookApi?.focusCellById?.(sec.cellId);
+          },
+          onRun: () => void this.notebookApi?.runCellById?.(sec.cellId),
+          onStop: () => this.notebookApi?.stopCellById?.(sec.cellId),
+        };
+      });
+      mount(host, items);
+      // ps-spa wires the click handlers; the right-click menu is attached here
+      // (re-attached each render since ps-spa replaces the DOM).
+      requestAnimationFrame(() => {
+        host.querySelectorAll<HTMLElement>('[data-nav-cell]').forEach((card) => {
+          const cellId = card.dataset.navCell ?? '';
+          const idx = sections.find((s) => s.cellId === cellId)?.cellIndex ?? 0;
+          card.oncontextmenu = (e) => {
+            e.preventDefault();
+            this.openCellNavMenu(e.clientX, e.clientY, cellId, idx);
+          };
+        });
+      });
+      return;
+    }
     host.innerHTML = '';
     if (sections.length === 0) {
       host.innerHTML = '<div class="text-xs italic text-slate-600">No cells yet.</div>';
@@ -902,8 +954,12 @@ class VerdictEditorElement extends HTMLElement {
       const card = document.createElement('div');
       card.dataset.navCell = sec.cellId;
       card.className =
-        'flex items-center gap-2 rounded-lg border px-2.5 py-1.5 ' +
+        'flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 ' +
         (sec.focused ? 'border-indigo-400/60 bg-indigo-500/10' : 'border-slate-800/80 bg-slate-900/40');
+      card.oncontextmenu = (e) => {
+        e.preventDefault();
+        this.openCellNavMenu(e.clientX, e.clientY, sec.cellId, sec.cellIndex);
+      };
 
       const navBtn = document.createElement('button');
       navBtn.type = 'button';
@@ -919,11 +975,16 @@ class VerdictEditorElement extends HTMLElement {
       const label = sec.kind === 'module' ? 'Module' : isText ? 'Text' : sec.kind === 'asset' ? 'Asset' : 'Runnable';
       num.textContent = `${sec.cellIndex + 1} · ${label}`;
       meta.appendChild(num);
-      const prev = document.createElement('div');
-      prev.className = 'truncate font-mono text-[11px] text-slate-300';
-      prev.textContent = sec.preview ?? '';
       navBtn.appendChild(meta);
-      navBtn.appendChild(prev);
+      // Only show a second line when the user has named the cell — never the raw
+      // source first line (it overflows the nav). Truncates to fit the panel.
+      const cellName = (sec.name ?? '').trim();
+      if (cellName) {
+        const nameEl = document.createElement('div');
+        nameEl.className = 'truncate font-mono text-[11px] text-slate-300';
+        nameEl.textContent = cellName;
+        navBtn.appendChild(nameEl);
+      }
       card.appendChild(navBtn);
 
       if (isRunnable) {
@@ -953,6 +1014,43 @@ class VerdictEditorElement extends HTMLElement {
       card.appendChild(dot);
       host.appendChild(card);
     }
+  }
+
+  /** Right-click menu on a cell-nav card: run / focus / remove the cell. */
+  private openCellNavMenu(x: number, y: number, cellId: string, cellIndex: number) {
+    document.querySelector('.notebook-nav-context-menu')?.remove();
+    const menu = document.createElement('div');
+    menu.className =
+      'notebook-nav-context-menu fixed z-50 min-w-[150px] rounded-md border border-slate-700 bg-slate-900 py-1 text-xs text-slate-200 shadow-xl';
+    menu.style.left = `${Math.min(x, window.innerWidth - 170)}px`;
+    menu.style.top = `${Math.min(y, window.innerHeight - 120)}px`;
+    const item = (label: string, danger: boolean, onClick: () => void) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className =
+        'block w-full px-3 py-1.5 text-left hover:bg-slate-800 ' + (danger ? 'text-rose-300 hover:text-rose-200' : '');
+      b.textContent = label;
+      b.onclick = () => {
+        menu.remove();
+        onClick();
+      };
+      menu.appendChild(b);
+    };
+    item('Run', false, () => void this.notebookApi?.runCellById?.(cellId));
+    item('Focus', false, () => this.notebookApi?.focusCellById?.(cellId));
+    item('Rename…', false, () => {
+      const next = window.prompt('Cell name (shown in the Cells panel):', '');
+      if (next !== null) this.notebookApi?.renameCellById?.(cellId, next.trim());
+    });
+    item(`Remove cell ${cellIndex + 1}`, true, () => this.notebookApi?.deleteCellById?.(cellId));
+    document.body.appendChild(menu);
+    const dismiss = (ev: MouseEvent) => {
+      if (!menu.contains(ev.target as Node)) {
+        menu.remove();
+        document.removeEventListener('mousedown', dismiss);
+      }
+    };
+    setTimeout(() => document.addEventListener('mousedown', dismiss), 0);
   }
 
   private setActiveSideTab(tab: 'cells' | 'inputs') {
@@ -1000,9 +1098,19 @@ class VerdictEditorElement extends HTMLElement {
       this.vizDirty = true;
       void this.refreshVisualization();
     }
-    if (tab === 'debug' && this.finvmState && Object.keys(this.finvmState).length > 0) {
-      // Show the current shared FinVM session (populated by notebook cell runs).
-      this.renderVmState(this.finvmState);
+    if (tab === 'debug' || tab === 'db') {
+      // The FinVM session lives in the worker now; pull the latest (incl. live DB
+      // tables) when the tab opens, and poll while it stays open so it updates
+      // during an endless (actor) run that never returns a result.
+      this.startDbDebugPoll();
+      if (tab === 'debug') this.refreshBytecodeView();
+      void this.syncFinvmFromWorker().then(() => {
+        if (this.activeMainTab !== tab) return;
+        if (tab === 'debug') this.renderVmState(this.finvmState);
+        else this.refreshDbQueryOutput();
+      });
+    } else {
+      this.stopDbDebugPoll();
     }
     this.updateWorkspaceChrome();
     const tabButtons = this.mainContainer.querySelectorAll<HTMLButtonElement>('[data-main-tab-id]');
@@ -1460,7 +1568,15 @@ class VerdictEditorElement extends HTMLElement {
     if (!this.liveBusy) {
       this.liveBusy = true;
       try {
-        await this.runProgram();
+        // "Run every X seconds" = a plain global timer: stop all cells, then run
+        // them all fresh, each tick. (Per-cell looping is the cell's own job via
+        // an actor — this is the environment-driven re-run for other cases.)
+        this.notebookApi?.stopAll?.();
+        if (this.notebookApi?.runAll) {
+          await this.notebookApi.runAll();
+        } else {
+          await this.runProgram();
+        }
       } catch {
         /* keep the loop alive across transient run errors */
       } finally {
@@ -1582,6 +1698,28 @@ class VerdictEditorElement extends HTMLElement {
     this.resizeCleanup = () => {
       handle.removeEventListener('mousedown', onMouseDown);
     };
+  }
+
+  /** Populate the Debug "FinVM Bytecode" pane from the current program. Notebook
+   * cells eval on the worker (not executeProgram), so the bytecode view was never
+   * filled; compile on the main thread for display only. Uses the notebook
+   * compiler (compileBindingsJS) so the Verdict libraries (IDE/Display/…) link. */
+  private refreshBytecodeView(): void {
+    if (!vlib || !this.bytecodeEditor) return;
+    const code = this.materializeInputs(this.getProgramSource());
+    const compile = vlib.compileBindingsJS ?? vlib.compileJS;
+    const c = compile(code);
+    if (c.ok) {
+      this.bytecodeEditor.setValue(c.output);
+      try {
+        this.latestCompiledProgram = JSON.parse(c.output);
+      } catch {
+        this.latestCompiledProgram = null;
+      }
+    } else {
+      this.bytecodeEditor.setValue(`// compile error: ${c.error}`);
+      this.latestCompiledProgram = null;
+    }
   }
 
   private renderVmState(snapshot: unknown) {
@@ -2193,12 +2331,117 @@ class VerdictEditorElement extends HTMLElement {
     return wrapper;
   }
 
+  /** Pull the FinVM session (incl. live DB tables) from the worker into the main
+   * thread so the DB/Debug tabs reflect it. The worker owns the authoritative
+   * state; a looping cell never returns a result, so we ask on demand. */
+  private async syncFinvmFromWorker(): Promise<void> {
+    const worker = this.ensureFinvmWorker();
+    if (!worker) return;
+    try {
+      const s = await worker.getFinvmState();
+      if (s && typeof s === 'object') this.finvmState = s;
+    } catch {
+      /* keep the last-known state */
+    }
+  }
+
+  private startDbDebugPoll(): void {
+    this.stopDbDebugPoll();
+    this.dbDebugPollTimer = window.setInterval(() => {
+      const tab = this.activeMainTab;
+      if (tab !== 'db' && tab !== 'debug') {
+        this.stopDbDebugPoll();
+        return;
+      }
+      void this.syncFinvmFromWorker().then(() => {
+        if (this.activeMainTab === 'debug') this.renderVmState(this.finvmState);
+        else if (this.activeMainTab === 'db') this.refreshDbQueryOutput();
+      });
+    }, 2000);
+  }
+
+  private stopDbDebugPoll(): void {
+    if (this.dbDebugPollTimer != null) {
+      window.clearInterval(this.dbDebugPollTimer);
+      this.dbDebugPollTimer = null;
+    }
+  }
+
+  /** Apply the light/dark theme to the whole environment (a class on <html> that
+   * the CSS layer keys off), persist it, and re-render charts to match. */
+  private setTheme(light: boolean): void {
+    const root = document.documentElement;
+    root.classList.toggle('theme-light', light);
+    root.classList.toggle('theme-dark', !light);
+    if (this.themeToggleBtn) this.themeToggleBtn.textContent = light ? 'Dark' : 'Light';
+    try {
+      localStorage.setItem('verdict-theme', light ? 'light' : 'dark');
+    } catch {
+      /* ignore */
+    }
+    // Re-skin every open CodeMirror editor (shell + notebook cells live in
+    // separate bundles; both listen for this event and reconfigure in place).
+    window.dispatchEvent(new CustomEvent('verdict-theme-change', { detail: { light } }));
+    // Charts read theme colors at render time; nudge the visual tab to repaint.
+    this.vizDirty = true;
+    if (this.activeMainTab === 'visual') void this.refreshVisualization();
+  }
+
+  private initTheme(): void {
+    // Host config wins; otherwise the persisted user choice; otherwise dark.
+    if (this.cfg?.theme) {
+      this.setTheme(this.cfg.theme === 'light');
+      return;
+    }
+    let light = false;
+    try {
+      light = localStorage.getItem('verdict-theme') === 'light';
+    } catch {
+      /* ignore */
+    }
+    this.setTheme(light);
+  }
+
+  /** Lazily create the FinVM worker; null (→ main-thread fallback) if it can't. */
+  private ensureFinvmWorker(): FinvmWorkerClient | null {
+    if (this.finvmWorker) return this.finvmWorker;
+    if (this.finvmWorkerFailed) return null;
+    try {
+      this.finvmWorker = new FinvmWorkerClient();
+      return this.finvmWorker;
+    } catch {
+      this.finvmWorkerFailed = true;
+      return null;
+    }
+  }
+
   private async runFinvmProgram(programJson: string, persistState: boolean): Promise<{ ok: true; resultText: string; steps: number } | { ok: false; error: string }> {
     const finvm = finvmLib as FinVmModule;
     try {
       const program = JSON.parse(programJson);
       const source = this.materializeInputs(this.getProgramSource());
       const srcSig = sourceSignature(source);
+      // Run the whole program on the worker too, so it never blocks the UI and
+      // shares the same FinVM session as the notebook cells.
+      const worker = this.ensureFinvmWorker();
+      if (worker) {
+        const entry0 = typeof program.entrypoint === 'string' ? program.entrypoint : 'main';
+        try {
+          const r = await worker.runProgram(JSON.stringify(program), source, entry0, persistState);
+          if (!r.ok) return { ok: false, error: r.error };
+          this.lastVmSteps = r.steps;
+          this.finvmState = r.finvmState;
+          if (this.vmStatePanel) {
+            this.renderVmState({ status: r.vmStatus, steps: r.steps, result: r.result, state: r.state });
+          }
+          this.refreshDbQueryOutput();
+          return { ok: true, resultText: formatVmValue(r.result), steps: r.steps };
+        } catch {
+          this.finvmWorkerFailed = true;
+          this.finvmWorker = null;
+          // fall through to the main-thread path
+        }
+      }
       const { userState, machineSnapshot, sourceSig: savedSig } = persistState
         ? splitNotebookFinvmState(this.finvmState)
         : { userState: {}, machineSnapshot: null, sourceSig: null };
@@ -2269,14 +2512,12 @@ class VerdictEditorElement extends HTMLElement {
   }
 
   private readRuntimeInputs(): Record<string, unknown> {
-    const out: Record<string, unknown> = {
-      symbol: this.currentSymbol(),
-      assetsCsv: this.assetsCsvInput?.value ?? 'BTCUSD,ETHUSD,ADAUSD',
-      signalThreshold: Number(this.signalThresholdInput?.value ?? '2'),
-      positionBias: Number(this.positionBiasInput?.value ?? '0'),
-      telegramBotToken: this.telegramBotTokenInput?.value ?? '',
-      telegramChatId: this.telegramChatIdInput?.value ?? '',
-    };
+    const out: Record<string, unknown> = {};
+    // Config-driven fixed inputs (number specs coerce to Number).
+    const specByKey = new Map(this.cfg.inputs.map((s) => [s.key, s]));
+    for (const [key, el] of this.runtimeInputEls) {
+      out[key] = specByKey.get(key)?.type === 'number' ? Number(el.value) : el.value;
+    }
     if (this.inputsList) {
       const rows = this.inputsList.querySelectorAll<HTMLDivElement>('[data-input-row]');
       rows.forEach((row) => {
@@ -2348,7 +2589,7 @@ class VerdictEditorElement extends HTMLElement {
   }
 
   private currentSymbol(): string {
-    const raw = (this.symbolInput?.value ?? 'BTCUSD').trim().toUpperCase();
+    const raw = (this.runtimeInputEls.get('symbol')?.value ?? 'BTCUSD').trim().toUpperCase();
     return raw === '' ? 'BTCUSD' : raw;
   }
 
@@ -2387,3 +2628,34 @@ interface FinVmModule {
 
 customElements.define('verdict-editor', VerdictEditorElement);
 customElements.define('verdict-editor-debug', VerdictEditorDebugElement);
+
+/**
+ * Programmatic embedding entry point. Creates a `<verdict-editor>` with the
+ * given host config and appends it to `host`. The element reads its config in
+ * connectedCallback, so this sets `.config` before appending.
+ */
+export function mountVerdictEditor(
+  host: HTMLElement,
+  config?: EditorConfig,
+): HTMLElement & { config?: EditorConfig } {
+  const el = document.createElement('verdict-editor') as HTMLElement & { config?: EditorConfig };
+  if (config) el.config = config;
+  host.appendChild(el);
+  return el;
+}
+
+// Re-exports so embedders import everything from the editor entry module.
+export type {
+  EditorConfig,
+  StorageAdapter,
+  EffectBackendConfig,
+  InputFieldSpec,
+  NotebookDoc,
+} from './editor/editorConfig';
+export { localStorageAdapter } from './editor/editorConfig';
+export {
+  namespacedLocalStorageAdapter,
+  inMemoryAdapter,
+  restAdapter,
+} from './editor/storageAdapters';
+export { financeConfig } from './editor/templates/finance';

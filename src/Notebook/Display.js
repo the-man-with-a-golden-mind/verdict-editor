@@ -59,14 +59,21 @@ async function renderLayout(host, d, bridge, layoutKind) {
     heading.textContent = d.title;
     layoutEl.appendChild(heading);
   }
-  for (const item of d.items ?? []) {
+  // Attach the layout AND every item slot to the live DOM BEFORE rendering their
+  // content. Charts must measure their final flex width when they render —
+  // otherwise Plotly can't size to a detached node and falls back to its 700px
+  // default, overflowing its column (covering the neighbour) and the text below.
+  host.appendChild(layoutEl);
+  const slots = (d.items ?? []).map((item) => {
     const child = document.createElement("div");
     child.className =
       layoutKind === "row" ? "notebook-display-row__item min-w-[min(100%,380px)] flex-1" : "";
     layoutEl.appendChild(child);
+    return [child, item];
+  });
+  for (const [child, item] of slots) {
     await renderDisplayInto(child, item, bridge);
   }
-  host.appendChild(layoutEl);
 }
 
 export async function renderDisplayInto(host, raw, bridge) {
@@ -99,6 +106,63 @@ export async function renderDisplayInto(host, raw, bridge) {
   }
   if (d.kind === "stack" || d.kind === "col" || d.kind === "row") {
     await renderLayout(host, d, bridge, d.kind);
+  }
+}
+
+// Which Display kind currently occupies `host` (read back from the DOM that
+// renderDisplayInto produced), so a live update can tell whether the shape is
+// unchanged and reuse the existing nodes instead of rebuilding.
+function existingDisplayKind(host) {
+  const w = host.firstElementChild;
+  if (!w) return null;
+  if (w.dataset?.plotlyChart) return "chart";
+  if (w.dataset?.displayStack) return "stack";
+  if (w.dataset?.displayCol) return "col";
+  if (w.dataset?.displayRow) return "row";
+  if (w.classList?.contains("notebook-text-output")) return "text";
+  return "other";
+}
+
+/**
+ * Update `host` to show `raw`, reusing existing DOM when the Display tree shape
+ * is unchanged. This is what lets a live (looping) cell refresh without throwing
+ * away the viewer's chart zoom/pan: charts are updated in place via Plotly.react
+ * (which, with the layout's stable uirevision, preserves the current axis range),
+ * text is patched, and only a genuine structural change falls back to a full
+ * rebuild. Mirrors renderDisplayInto's structure exactly.
+ */
+export async function reconcileDisplayInto(host, raw, bridge) {
+  const d = decodeDisplay(raw);
+  if (!d) return renderDisplayInto(host, raw, bridge);
+  const reconcilable =
+    existingDisplayKind(host) === d.kind &&
+    (d.kind === "text" || d.kind === "chart" || d.kind === "stack" || d.kind === "col" || d.kind === "row");
+  if (!reconcilable) return renderDisplayInto(host, raw, bridge);
+
+  const w = host.firstElementChild;
+  if (d.kind === "text") {
+    w.innerHTML = markdownToHtml(d.text ?? "");
+    return;
+  }
+  if (d.kind === "chart") {
+    // Re-react the EXISTING plot element (do NOT clear it first): Plotly.react
+    // diffs the new data against the live plot and keeps zoom/pan via uirevision.
+    await renderChartImpl(w)(d)(bridge)();
+    return;
+  }
+  // Layout (stack/col/row): reuse the wrapper if heading-presence and child count
+  // match, then reconcile each child; otherwise rebuild this subtree.
+  const items = d.items ?? [];
+  const hasHeading = !!w.firstElementChild?.classList?.contains("notebook-display-heading");
+  if (!!d.title !== hasHeading) return renderDisplayInto(host, raw, bridge);
+  let childEls = Array.from(w.children);
+  if (hasHeading) {
+    if (childEls[0].textContent !== d.title) childEls[0].textContent = d.title ?? "";
+    childEls = childEls.slice(1);
+  }
+  if (childEls.length !== items.length) return renderDisplayInto(host, raw, bridge);
+  for (let i = 0; i < items.length; i++) {
+    await reconcileDisplayInto(childEls[i], items[i], bridge);
   }
 }
 

@@ -10,6 +10,7 @@ import {
 } from "../Notebook/index.js";
 import { updateJsModel } from "../Notebook.Model/index.js";
 import { routeEvalResults as psRouteEvalResults } from "../Notebook.Run/index.js";
+import { cellViewPlan as psCellViewPlan } from "../Notebook.CellView/index.js";
 import { seedSignature } from "../Seed/index.js";
 import { extractVerdictDocs } from "../VerdictDocs/index.js";
 
@@ -82,7 +83,7 @@ export function normalizeCellUi(ui) {
     outputFolded: Boolean(ui?.outputFolded),
     editorHeight: Number.isFinite(ui?.editorHeight) ? Math.round(ui.editorHeight) : 160,
     editorResized: Boolean(ui?.editorResized),
-    outputHeight: Number.isFinite(ui?.outputHeight) ? Math.round(ui.outputHeight) : 180,
+    outputHeight: Number.isFinite(ui?.outputHeight) ? Math.round(ui.outputHeight) : 480,
     outputResized: Boolean(ui?.outputResized),
   };
 }
@@ -94,6 +95,17 @@ export function normalizeCellUi(ui) {
  */
 export function routeEvalResults(cells, outs, upToIdx, focusCellId) {
   return psRouteEvalResults(cells)(outs)(upToIdx)(focusCellId);
+}
+
+/**
+ * Pure cell-VIEW render plan (Notebook.CellView.cellViewPlan). `input` carries
+ * the cell's render-relevant state as primitives (incl. window.innerHeight as
+ * `viewportHeight`, read in JS). Returns the plan { showFolded, wrapClass,
+ * showCodeFoldedBar, showEditorSection, editorHeightPx, maxEditorHeightPx,
+ * showOutput, outputMode, outputHeightPx } for JS to apply to the DOM.
+ */
+export function cellViewPlan(input) {
+  return psCellViewPlan(input);
 }
 
 export function updateModel(model, msg) {

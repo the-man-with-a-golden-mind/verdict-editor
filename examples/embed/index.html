@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Verdict editor — embed example</title>
+    <!-- One CSS file ships with the element bundle. -->
+    <link rel="stylesheet" href="./style.css" />
+    <style>
+      html, body { margin: 0; height: 100%; background: #0b0f1a; }
+      #host { position: fixed; inset: 0; }
+    </style>
+  </head>
+  <body>
+    <!-- A host gives the editor a box to fill and a config. -->
+    <div id="host"></div>
+    <script type="module">
+      import { mountVerdictEditor, inMemoryAdapter } from "./verdict-editor.mjs";
+
+      // The runtime /lib bundles sit next to this page (dist/embed/lib). Resolve
+      // their URL relative to the page so the demo works at any mount path.
+      const libBaseUrl = new URL("./lib", import.meta.url).href;
+
+      mountVerdictEditor(document.getElementById("host"), {
+        notebookId: "demo",
+        libBaseUrl,
+        // Demo persistence; swap for restAdapter({ baseUrl, headers }) against a DB.
+        storage: inMemoryAdapter(),
+        // Host-defined inputs (replace the finance defaults).
+        inputs: [
+          { key: "greeting", default: "hello" },
+          { key: "n", type: "number", default: 3 },
+        ],
+        // Starter document. Omit for a blank notebook, or use financeConfig().
+        defaultDocument: {
+          formatVersion: 3,
+          seedSig: "demo",
+          cells: [
+            {
+              kind: "code",
+              role: "runnable",
+              path: "Main.verdict",
+              moduleName: "Main",
+              source:
+                'module Main exposing (greeting)\n\ngreeting : String\ngreeting = strConcat("embedded: ", __INPUT_greeting__)',
+            },
+          ],
+        },
+      });
+    </script>
+  </body>
+</html>

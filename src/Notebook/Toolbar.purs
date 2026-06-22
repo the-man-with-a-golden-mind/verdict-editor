@@ -19,6 +19,7 @@ import PsSpa.View (Document)
 type ToolbarProps =
   { onSave :: Effect Unit
   , onAddCode :: Effect Unit
+  , onAddModule :: Effect Unit
   , onAddText :: Effect Unit
   , onCut :: Effect Unit
   , onCopy :: Effect Unit
@@ -57,7 +58,8 @@ viewToolbar props =
       [ H.div
           [ H.className "notebook-toolbar flex shrink-0 flex-wrap items-center gap-2 px-0 py-0" ]
           [ btn "Save" "border-slate-600" "Save notebook as .vnb" props.onSave
-          , btn "+ Code" "" "Insert a code cell" props.onAddCode
+          , btn "+ Runnable" "" "Insert a runnable cell (module Main exposing (main))" props.onAddCode
+          , btn "+ Module" "" "Insert a module cell (shared helpers, imported by other cells)" props.onAddModule
           , btn "+ Text" "" "Insert a text cell" props.onAddText
           , btn "Cut" "" "Cut selected cell" props.onCut
           , btn "Copy" "" "Copy selected cell" props.onCopy

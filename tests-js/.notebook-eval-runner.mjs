@@ -240,8 +240,8 @@ function shallowEqualJsonField(a, b) {
   }
   return String(a) === String(b);
 }
-function createFinvmHandlers(storage, fetchImpl = globalThis.fetch.bind(globalThis), signal) {
-  return {
+function createFinvmHandlers(storage, fetchImpl = globalThis.fetch.bind(globalThis), signal, onEmit, overrides) {
+  const handlers = {
     // Real `time.sleep@1` effect (EFFECT_AWAIT). A cell's `sleep`/`loopEvery`
     // helper emits this so the loop cadence lives in the cell source. The
     // generic effect payload passes the single arg through as `args`, so the
@@ -302,8 +302,13 @@ function createFinvmHandlers(storage, fetchImpl = globalThis.fetch.bind(globalTh
       return storage.dbDelete(String(p.table ?? ""), String(p.id ?? ""));
     },
     "cache.set": async (p) => {
+      const ns = String(p.ns ?? "");
+      if (ns === "__display__") {
+        onEmit?.(p.value ?? null);
+        return true;
+      }
       const key = String(p.cacheKey ?? p.key2 ?? "");
-      return storage.cacheSet(String(p.ns ?? ""), key, p.value ?? null);
+      return storage.cacheSet(ns, key, p.value ?? null);
     },
     "cache.get": async (p) => {
       const key = String(p.cacheKey ?? p.key2 ?? "");
@@ -318,6 +323,7 @@ function createFinvmHandlers(storage, fetchImpl = globalThis.fetch.bind(globalTh
       return storage.cacheDelete(String(p.ns ?? ""), key);
     }
   };
+  return overrides ? { ...handlers, ...overrides } : handlers;
 }
 function vmRunFinished(out) {
   return out.status === "completed" || out.status === "deadlock";
@@ -540,7 +546,25 @@ function wrapBindingAsMain(src, bindingName) {
   const escaped = bindingName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return src.replace(/\bmain\b/g, "__nbUserMain__").replace(new RegExp(`\\b${escaped}\\b`, "g"), "main");
 }
+var compileCache = /* @__PURE__ */ new Map();
+var COMPILE_CACHE_MAX = 48;
 function compileNotebookProgram(vlib, src, bindingName) {
+  const key = `${bindingName ?? ""}\0${src}`;
+  const hit = compileCache.get(key);
+  if (hit) {
+    compileCache.delete(key);
+    compileCache.set(key, hit);
+    return hit;
+  }
+  const result = compileNotebookProgramUncached(vlib, src, bindingName);
+  compileCache.set(key, result);
+  if (compileCache.size > COMPILE_CACHE_MAX) {
+    const oldest = compileCache.keys().next().value;
+    if (oldest !== void 0) compileCache.delete(oldest);
+  }
+  return result;
+}
+function compileNotebookProgramUncached(vlib, src, bindingName) {
   if (bindingName && typeof vlib.compileBindingEntryJS === "function") {
     if (bindingName !== "main") {
       const wrapped = wrapBindingAsMain(src, bindingName);
@@ -557,7 +581,7 @@ function compileNotebookProgram(vlib, src, bindingName) {
   const r = vlib.compileJS(src);
   return r.ok ? { ok: true, output: r.output, entry: "main" } : { ok: false, error: r.error };
 }
-async function runBindingOnFinvm(finvm, programJson, bindingName, finvmState, effectStorage, sourceSig, signal) {
+async function runBindingOnFinvm(finvm, programJson, bindingName, finvmState, effectStorage, sourceSig, signal, onEmit, fetchImpl, handlerOverrides) {
   try {
     const program = JSON.parse(programJson);
     if (!program.functions) return { ok: false, error: "Invalid compiled program" };
@@ -571,7 +595,7 @@ async function runBindingOnFinvm(finvm, programJson, bindingName, finvmState, ef
       state: userState,
       machineSnapshot: snapshot,
       entryFunction: bindingName,
-      handlers: createFinvmHandlers(effectStorage, void 0, signal)
+      handlers: createFinvmHandlers(effectStorage, fetchImpl, signal, onEmit, handlerOverrides)
     });
     if (!vmOut.ok) return { ok: false, error: vmOut.error };
     const dbState = effectDbTablesToFinvmState(effectStorage.listDbTables());
@@ -639,7 +663,10 @@ async function evalNotebookCells(ctx, source, names, opts) {
       state,
       storage,
       srcSig,
-      opts?.signal
+      opts?.signal,
+      ctx.onEmit ? (value) => ctx.onEmit(opts?.cell?.id, value) : void 0,
+      ctx.fetchImpl,
+      ctx.effectHandlers
     );
     if (!run.ok) {
       outputs.push({ name, ok: false, typeSig: sigOf(name), error: run.error });
@@ -667,7 +694,12 @@ function wrapVerdictLibForNotebook(vlib, notebookLib) {
     ...notebookLib.compileBindingsJS ? { compileBindingsJS: notebookLib.compileBindingsJS.bind(notebookLib) } : {},
     ...notebookLib.compileBindingEntryJS ? { compileBindingEntryJS: notebookLib.compileBindingEntryJS.bind(notebookLib) } : {},
     ...notebookLib.nullaryBindingsJS ? { nullaryBindingsJS: notebookLib.nullaryBindingsJS.bind(notebookLib) } : {},
-    ...notebookLib.evalBindingsJsonJS ? { evalBindingsJsonJS: notebookLib.evalBindingsJsonJS.bind(notebookLib) } : {}
+    ...notebookLib.evalBindingsJsonJS ? { evalBindingsJsonJS: notebookLib.evalBindingsJsonJS.bind(notebookLib) } : {},
+    // Diagnostics must use the notebook lib's compiler too: it links the Verdict
+    // libraries (CellBus, Loop, Display, Actor, IDE) the same way the run path
+    // does. The base verdict.mjs diagnosticsJS does not, so cells importing those
+    // libraries (e.g. busQueue/loopEvery) would show false "unknown name" errors.
+    ...notebookLib.diagnosticsJS ? { diagnosticsJS: notebookLib.diagnosticsJS.bind(notebookLib) } : {}
   };
 }
 export {

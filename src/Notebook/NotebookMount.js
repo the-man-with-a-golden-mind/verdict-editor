@@ -1,7 +1,7 @@
 "use strict";
 
 import { mountWysiwyg } from "./WysiwygFFI.js";
-import { decodeDisplay, renderDisplayInto } from "./Display.js";
+import { decodeDisplay, renderDisplayInto, reconcileDisplayInto } from "./Display.js";
 import {
   createVerdictEditor,
   disposeVerdictEditor,
@@ -19,6 +19,7 @@ import {
   cellPreviewLine,
   updateModel,
   routeEvalResults,
+  cellViewPlan,
 } from "./NotebookPs.js";
 import {
   buildNotebookProgramSource,
@@ -135,10 +136,9 @@ export function mountNotebookImpl(selector) {
           cachedDocs: new Map(),
           maximizedCellId: null,
           running: new Set(),
-          // Cells whose Run started an in-cell loop. The cell keeps re-running
-          // (driven by its own `time.sleep` cadence) until Stop clears it. Loops
-          // are PER CELL and independent.
-          cellLoops: new Set(),
+          // Latest Display value a cell emitted live (actor → output). Rendered
+          // immediately on emit and re-rendered when the cell's output redraws.
+          liveEmit: {},
           runControllers: {},
           executionCounts: {},
           executionSeq: 0,
@@ -246,7 +246,13 @@ export function mountNotebookImpl(selector) {
           ) {
             state.cells = saved.cells.map(mapLoadedCell);
           } else {
-            state.cells = seeded.cells;
+            // Fresh start: module/library cells begin FOLDED (they are reference,
+            // not the thing you run), runnable cells stay open. User edits persist,
+            // so this only applies to the initial seed.
+            state.cells = seeded.cells.map((c) => ({
+              ...c,
+              ui: { ...c.ui, folded: isModuleCell(c) },
+            }));
             persist(state, bridge);
           }
           publishSource();
@@ -300,11 +306,51 @@ export function mountNotebookImpl(selector) {
             throw new Error(chk.error ?? "Compile failed");
           }
           if (cellNames.length === 0) return [];
+          // Live output: an actor cell emits Display values via the __display__
+          // channel; render each to this cell's output the moment it arrives,
+          // instead of waiting for the (endless) eval to return.
+          const onEmit = (_id, value) => {
+            state.liveEmit[cell.id] = value;
+            renderEmitToCell(cell.id, value);
+          };
           // Each cell is its own runtime entity: run only this cell's bindings.
           // Cross-cell state lives in the shared FinVM snapshot + IDE actor/cache layer.
           return await Promise.resolve(
-            bridge.evalCells?.(src, cellNames, { signal, cellId: cell.id, cellIndex: cellIdx }) ?? [],
+            bridge.evalCells?.(src, cellNames, { signal, cellId: cell.id, cellIndex: cellIdx, onEmit }) ?? [],
           );
+        }
+
+        function renderEmitToCell(cellId, value) {
+          const host = stack.querySelector(`[data-cell-output="${cellId}"]`);
+          if (!host) {
+            // Output area not in the DOM yet — re-render the cell so it appears;
+            // fillOutputHost then paints the stored liveEmit value.
+            void patchCellDom(cellId);
+            return;
+          }
+          // Live re-render without the view jumping. Two things move on each emit:
+          // the output's own scroll, and — the real culprit — the outer cell stack.
+          // renderDisplayInto is async (charts), so clearing now collapses the
+          // output box to zero height; the stack reflows up and snaps the reader to
+          // the top, refilling a tick later. Freeze the box's current height across
+          // the swap so nothing reflows, then restore BOTH scroll positions (the
+          // inner output and the outer stack) once the new content is painted. This
+          // is generic — it applies to every cell's output, no per-cell logic.
+          const innerTop = host.scrollTop;
+          const innerLeft = host.scrollLeft;
+          const stackTop = stack.scrollTop;
+          const prevHeight = host.style.height;
+          host.style.height = `${host.offsetHeight}px`;
+          const restore = () => {
+            host.style.height = prevHeight; // back to the cell's sizing mode (capped/none/pinned)
+            host.scrollTop = innerTop;
+            host.scrollLeft = innerLeft;
+            stack.scrollTop = stackTop;
+          };
+          // Reconcile in place: same-shape updates reuse the chart elements (so
+          // Plotly.react keeps the viewer's zoom/pan); only a structural change
+          // rebuilds. No innerHTML wipe on the common path → no collapse/flash.
+          Promise.resolve(reconcileDisplayInto(host, value, bridge)).then(restore, restore);
         }
 
         function concatenate() {
@@ -497,6 +543,18 @@ export function mountNotebookImpl(selector) {
           focusCellById: (id) => {
             focusCell(id);
           },
+          deleteCellById: (id) => {
+            const i = state.cells.findIndex((c) => c.id === id);
+            if (i >= 0) deleteCellAt(i);
+          },
+          renameCellById: (id, name) => {
+            const c = state.cells.find((c) => c.id === id);
+            if (!c) return;
+            updateNotebook({ tag: "setName", id, name: String(name ?? "").trim() });
+            persist(state, bridge);
+            schedulePublishPanel();
+            void patchCellDom(id);
+          },
           notebookCells: () =>
             state.cells.map((c) => ({
               id: c.id,
@@ -652,81 +710,58 @@ export function mountNotebookImpl(selector) {
           return [...names];
         }
 
-        // A cell drives its own loop when its source uses the Loop library
-        // (`loopEvery`/`sleep`). The cadence is the millisecond arg in the cell
-        // source — nothing hidden, nothing global.
-        function isLoopCell(cell) {
-          return isRunnableCell(cell) && /\b(loopEvery|sleep)\b/.test(cell.source ?? "");
-        }
-
         // Single source of truth for the 3-color status dot, shared by the
-        // gutter and the Cells nav: orange while running/looping, red on the
+        // gutter and the Cells nav: orange while running (a looping cell is an
+        // actor whose eval runs until Stop, so it stays "running"), red on the
         // last error, green when the last run produced output, else gray.
         function cellStatus(cell) {
-          if (state.running.has(cell.id) || state.cellLoops.has(cell.id)) return "running";
+          if (state.running.has(cell.id)) return "running";
           if (state.errors[cell.id]) return "error";
           if (cellHasOutput(cell)) return "ok";
           return "idle";
         }
 
-        async function runCell(cell, cellIdx, opts = {}) {
+        async function runCell(cell, cellIdx) {
           if (!isRunnableCell(cell)) return;
-          // A loop re-runs the same cell, so allow the loop's own re-entry
-          // (looping flag) past the in-flight guard.
-          if (state.running.has(cell.id) && !opts.looping) return;
-          // Starting Run on a loop cell registers the loop before the first run
-          // so the status reflects "looping" immediately.
-          if (!opts.looping && isLoopCell(cell)) state.cellLoops.add(cell.id);
+          if (state.running.has(cell.id)) return;
+          ensureUi(cell);
           syncSharedEditorSource();
           const controller = new AbortController();
           state.runControllers[cell.id] = controller;
           state.running.add(cell.id);
-          const ui = ensureUi(cell);
           updateNotebook({ tag: "setOutputFolded", id: cell.id, folded: false });
           refreshCellGutter(cell, cellIdx);
           schedulePublishPanel();
-          let iterationErrored = false;
           try {
             const cellNames = bindingNamesForRun(cell);
             if (cellNames.length === 0) {
               state.errors[cell.id] = "";
               return;
             }
+            // The cell's own code decides whether it loops (an actor's eval runs
+            // until Stop). The host just runs it once and waits — no host-side
+            // re-run scheduler, so the cell behaves identically off the IDE.
             const outs = await evalCellOutputs(cell, cellIdx, controller.signal);
             if (controller.signal.aborted) return;
             applyEvalResults(outs, cellIdx, cell.id);
-            if (state.errors[cell.id]) iterationErrored = true;
           } catch (e) {
             if (!controller.signal.aborted) {
               state.errors[cell.id] = String(e);
-              iterationErrored = true;
             }
           } finally {
-            const aborted = controller.signal.aborted;
-            if (!aborted) {
+            if (!controller.signal.aborted) {
               state.executionSeq += 1;
               state.executionCounts[cell.id] = state.executionSeq;
             }
             state.running.delete(cell.id);
             delete state.runControllers[cell.id];
-            // Keep the loop alive while it is still registered and healthy; an
-            // error or Stop ends it (Stop already cleared cellLoops). The next
-            // pass runs immediately — the cell's own `time.sleep` already
-            // provided the inter-iteration delay during this run.
-            const shouldLoop = !aborted && !iterationErrored && state.cellLoops.has(cell.id);
-            if (iterationErrored) state.cellLoops.delete(cell.id);
             refreshCellGutter(cell, cellIdx);
             await refreshCellOutput(cell, cellIdx);
             schedulePublishPanel();
-            if (shouldLoop) {
-              const nextIdx = state.cells.findIndex((c) => c.id === cell.id);
-              if (nextIdx >= 0) void runCell(state.cells[nextIdx], nextIdx, { looping: true });
-            }
           }
         }
 
         function stopCell(cell) {
-          state.cellLoops.delete(cell.id);
           const controller = state.runControllers[cell.id];
           if (controller) controller.abort();
           state.running.delete(cell.id);
@@ -736,21 +771,32 @@ export function mountNotebookImpl(selector) {
           schedulePublishPanel();
         }
 
-        async function runAll() {
-          for (let i = 0; i < state.cells.length; i++) {
-            await runCell(state.cells[i], i);
-          }
+        function runAll() {
+          // Fire every runnable cell WITHOUT awaiting: an actor cell loops until
+          // Stop, so awaiting it in sequence would hang Run-all on the first
+          // looping cell. They run concurrently (interleaved on the worker);
+          // cross-cell data flows through the shared storage.
+          state.cells.forEach((cell, i) => void runCell(cell, i));
         }
 
-        async function runAbove(cellIdx) {
-          for (let i = 0; i <= cellIdx; i++) {
-            await runCell(state.cells[i], i);
-          }
+        function runAbove(cellIdx) {
+          for (let i = 0; i <= cellIdx; i++) void runCell(state.cells[i], i);
         }
 
         // --- Cell management (operate on whole cell objects so `ui` is preserved) ---
-        function addCellBelow(idx, kind) {
-          const cell = { id: newId(), ...normalizeCellMeta({ kind: kind === "wysiwyg" ? "wysiwyg" : "code", source: "" }), ui: defaultCellUi() };
+        // A cell's role is derived from its source header: `module Main exposing
+        // (main)` is runnable; `module <Name> exposing (..)` (Name != Main) is a
+        // shared module. These starter templates make that choice explicit when
+        // inserting a cell — the header is fully visible/editable, nothing hidden.
+        const RUNNABLE_TEMPLATE = "module Main exposing (main)\n\nmain =\n  \"edit me\"\n";
+        const MODULE_TEMPLATE =
+          "module NewModule exposing (..)\n\n" +
+          "-- Shared helpers. Rename NewModule, then import from a runnable cell:\n" +
+          "--   import NewModule exposing (..)\n" +
+          "greeting : String\ngreeting = \"hello from NewModule\"\n";
+
+        function addCellBelow(idx, kind, source = "") {
+          const cell = { id: newId(), ...normalizeCellMeta({ kind: kind === "wysiwyg" ? "wysiwyg" : "code", source }), ui: defaultCellUi() };
           const anchor = state.cells[idx];
           updateNotebook({ tag: "insertBelow", id: anchor?.id ?? "", cell });
           publishSource();
@@ -1011,6 +1057,11 @@ export function mountNotebookImpl(selector) {
 
         async function fillOutputHost(hostEl, cell, idx) {
           hostEl.innerHTML = "";
+          // Actor cells render whatever they last emitted on the live channel.
+          if (state.liveEmit[cell.id] !== undefined) {
+            await renderDisplayInto(hostEl, state.liveEmit[cell.id], bridge);
+            return true;
+          }
           const names = outputKeysForCell(cell);
           let hasContent = false;
           for (const n of names) {
@@ -1049,6 +1100,7 @@ export function mountNotebookImpl(selector) {
               cellIndex: i,
               cellId: cell.id,
               kind: cell.kind === "wysiwyg" ? "text" : isModuleCell(cell) ? "module" : "code",
+              name: cell.name ?? "",
               preview: getCellPreviewLine(cell),
               running: state.running.has(cell.id),
               focused: state.focusedId === cell.id,
@@ -1084,7 +1136,8 @@ export function mountNotebookImpl(selector) {
             void patchCellDom(cell.id);
           });
           if (isCodeCell) add("Save file", () => downloadCellFile(cell));
-          add("Insert code below", () => addCellBelow(idx, "code"), { sepBefore: true });
+          add("Insert runnable below", () => addCellBelow(idx, "code", RUNNABLE_TEMPLATE), { sepBefore: true });
+          add("Insert module below", () => addCellBelow(idx, "code", MODULE_TEMPLATE));
           add("Insert text below", () => addCellBelow(idx, "wysiwyg"));
           if (idx > 0) add("Move up", () => moveCellBy(idx, -1));
           if (idx < state.cells.length - 1) add("Move down", () => moveCellBy(idx, 1));
@@ -1171,19 +1224,34 @@ export function mountNotebookImpl(selector) {
           const isMax = maximized || state.maximizedCellId === cell.id;
           const editorH = isMax ? Math.max(ui.editorHeight, 320) : ui.editorHeight;
           const isCodeCell = cell.kind === "code";
+          const focused = state.focusedId === cell.id;
+
+          // Pure render decisions (fold visibility, wrap class, editor/output
+          // sizing) live in PureScript (Notebook.CellView). JS reads the live-only
+          // values (line count, window.innerHeight) and applies the returned plan.
+          const lineCount = Math.max((cell.source || "").split("\n").length, 1);
+          const plan = cellViewPlan({
+            kind: cell.kind,
+            focused,
+            isMax,
+            folded: Boolean(ui.folded),
+            codeFolded: Boolean(ui.codeFolded),
+            outputFolded: Boolean(ui.outputFolded),
+            editorResized: Boolean(ui.editorResized),
+            editorHeight: Math.round(ui.editorHeight),
+            outputResized: Boolean(ui.outputResized),
+            outputHeight: Math.round(ui.outputHeight),
+            lineCount,
+            viewportHeight: window.innerHeight || 900,
+          });
 
           const wrap = document.createElement("div");
-          // shrink-0 so cells keep their height and the stack scrolls (Jupyter-style)
-          // instead of compressing every cell to fit the viewport.
-          const focused = state.focusedId === cell.id;
-          wrap.className =
-            "notebook-cell shrink-0 rounded-md border bg-slate-950/60 overflow-hidden " +
-            (focused ? "border-indigo-400/70" : "border-slate-800");
+          wrap.className = plan.wrapClass;
           wrap.dataset.cellId = cell.id;
           wrap.dataset.cellFocused = focused ? "1" : "0";
           if (isMax) wrap.classList.add("notebook-cell--maximized");
 
-          if (ui.folded && !isMax) {
+          if (plan.showFolded) {
             await renderFoldedCell(wrap, cell, idx, ui, isCodeCell, isMax);
             return wrap;
           }
@@ -1209,7 +1277,7 @@ export function mountNotebookImpl(selector) {
             onFocus: () => focusCell(cell.id),
           });
 
-          if (ui.codeFolded && cell.kind === "code") {
+          if (plan.showCodeFoldedBar) {
             const bar = document.createElement("div");
             body.appendChild(bar);
             globalThis.__notebookMountCodeFoldedBar?.(bar, () => {
@@ -1221,13 +1289,19 @@ export function mountNotebookImpl(selector) {
           editorSection.className =
             "notebook-cell-editor-section relative flex flex-col min-h-0 overflow-hidden";
 
-          // Jupyter-style: the editor shows its FULL content so the wheel scrolls
-          // the page between cells instead of getting trapped in a per-cell
-          // scrollbar. A manual drag (editorResized) pins an explicit height.
-          const maxEditorH = isMax ? 2400 : 1600;
-          const lineCount = Math.max((cell.source || "").split("\n").length, 1);
-          const autoH = Math.min(Math.max(lineCount * 18 + 18, 48), maxEditorH);
-          const contentH = ui.editorResized ? Math.min(Math.max(ui.editorHeight, 48), maxEditorH) : autoH;
+          // Editor height + max are decided in PureScript (Notebook.CellView): a
+          // cell starts at its content height capped at ~1/3 of the viewport, and
+          // the user can drag it taller (editorResized pins an explicit height up
+          // to maxEditorHeightPx).
+          const maxEditorH = plan.maxEditorHeightPx;
+          // Unfocused code cells render a static preview — keep them compact (a
+          // scannable minimap) so a long cell doesn't fill the screen with a slab
+          // of clipped code. The focused (active) cell keeps the roomy ~1/3
+          // viewport editor; a manually resized cell keeps its pinned height.
+          let contentH = plan.editorHeightPx;
+          if (cell.kind === "code" && !focused && !isMax && !ui.editorResized) {
+            contentH = Math.min(contentH, 240);
+          }
           const editorHost = document.createElement("div");
           editorHost.className = "notebook-cell-editor font-mono text-xs verdict-cm-host";
           editorHost.dataset.cellEditorHost = cell.id;
@@ -1245,6 +1319,11 @@ export function mountNotebookImpl(selector) {
               editorHost.dataset.cellEditorActive = "1";
             } else {
               renderCodeCellPreview(editorHost, cell);
+              // Fade the bottom when the preview is clipped, so a compact cell
+              // reads as "more below" rather than a hard cut. ~16px per line.
+              if (lineCount * 16 > contentH + 8) {
+                editorHost.classList.add("notebook-cell-editor--clipped");
+              }
             }
           }
 
@@ -1288,19 +1367,20 @@ export function mountNotebookImpl(selector) {
             );
           }
 
-          if (!ui.outputFolded) {
+          if (plan.showOutput) {
             const outHost = document.createElement("div");
             outHost.className = "notebook-output border-t border-slate-800 px-3 py-2 overflow-auto";
             outHost.dataset.cellOutput = cell.id;
-            // Un-resized: cap with max-height so short output stays small. Once the
-            // user drags, pin an explicit height so growing AND shrinking both work
-            // (max-height alone can't grow past the content).
-            if (isMax) {
+            // Output sizing mode is decided in PureScript (Notebook.CellView):
+            //   "none"   -> maximized; no max-height cap
+            //   "pinned" -> user dragged; explicit height (grow AND shrink)
+            //   "capped" -> un-resized; max-height so short output stays small
+            if (plan.outputMode === "none") {
               outHost.style.maxHeight = "none";
-            } else if (ui.outputResized) {
-              outHost.style.height = `${Math.max(ui.outputHeight, 96)}px`;
+            } else if (plan.outputMode === "pinned") {
+              outHost.style.height = `${plan.outputHeightPx}px`;
             } else {
-              outHost.style.maxHeight = `${Math.max(ui.outputHeight, 96)}px`;
+              outHost.style.maxHeight = `${plan.outputHeightPx}px`;
             }
             await fillOutputHost(outHost, cell, idx);
             body.appendChild(outHost);
@@ -1420,8 +1500,8 @@ export function mountNotebookImpl(selector) {
           await renderFull();
         }
 
-        const onAddCode = () => {
-          const cell = { id: newId(), kind: "code", source: "", ui: defaultCellUi() };
+        function appendCodeCell(source) {
+          const cell = { id: newId(), ...normalizeCellMeta({ kind: "code", source }), ui: defaultCellUi() };
           updateNotebook({ tag: "appendCell", cell });
           publishSource();
           if (canIncrementalDom()) {
@@ -1432,7 +1512,10 @@ export function mountNotebookImpl(selector) {
           } else {
             render();
           }
-        };
+        }
+
+        const onAddCode = () => appendCodeCell(RUNNABLE_TEMPLATE);
+        const onAddModule = () => appendCodeCell(MODULE_TEMPLATE);
 
         const onAddText = () => {
           updateNotebook({
@@ -1493,6 +1576,7 @@ export function mountNotebookImpl(selector) {
           mountToolbar(toolbarButtonHost, {
             onSave,
             onAddCode,
+            onAddModule,
             onAddText,
             onCut,
             onCopy,

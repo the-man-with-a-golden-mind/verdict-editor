@@ -14,11 +14,12 @@
     "build:verdict-notebook": "node scripts/patch-verdict-bindings.mjs",
     "build:all": "npm run build:verdict-notebook && npm run build:notebook && npm run build",
     "build:test-eval": "node scripts/build-test-eval.mjs",
-    "test:notebook": "npm run build:test-eval && node --test tests-js/notebook-unit.test.mjs tests-js/notebook-bridge.test.mjs tests-js/notebook-project.test.mjs tests-js/notebook-bindings.test.mjs tests-js/notebook-shell.test.mjs tests-js/notebook-integration.test.mjs tests-js/notebook-vm-integration.test.mjs tests-js/notebook-vm-actors.test.mjs tests-js/notebook-verdict-actor.test.mjs tests-js/notebook-verdict-ide.test.mjs tests-js/notebook-cell-bus.test.mjs tests-js/notebook-display.test.mjs tests-js/notebook-prop-editor.test.mjs",
+    "test:notebook": "npm run build:test-eval && node --test tests-js/notebook-unit.test.mjs tests-js/notebook-bridge.test.mjs tests-js/notebook-project.test.mjs tests-js/notebook-bindings.test.mjs tests-js/notebook-shell.test.mjs tests-js/notebook-integration.test.mjs tests-js/notebook-vm-integration.test.mjs tests-js/notebook-vm-actors.test.mjs tests-js/notebook-verdict-actor.test.mjs tests-js/notebook-verdict-ide.test.mjs tests-js/notebook-cell-bus.test.mjs tests-js/notebook-display.test.mjs tests-js/notebook-prop-editor.test.mjs tests-js/notebook-cell-view.test.mjs",
     "test:e2e:notebook": "npm run build:all && node tests-js/notebook-e2e.test.mjs",
     "test:e2e:notebook-ui": "npm run build:notebook && npm run build && node tests-js/notebook-ui-e2e.test.mjs",
     "test:e2e:prop-editor": "npm run build:all && node tests-js/notebook-prop-editor-e2e.test.mjs",
-    "test:e2e:regression": "npm run build:all && node tests-js/regression-e2e.test.mjs"
+    "test:e2e:regression": "npm run build:all && node tests-js/regression-e2e.test.mjs",
+    "embed:build": "vite build --config vite.embed.config.mjs && node scripts/copy-embed-lib.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",

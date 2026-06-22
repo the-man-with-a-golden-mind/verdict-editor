@@ -1,3 +1,5 @@
+import { resolveLibUrl } from './libBase';
+
 export type CellOutput = {
   name: string;
   ok: boolean;
@@ -20,6 +22,8 @@ export type CellsNavSection = {
   cellIndex: number;
   cellId: string;
   kind?: 'code' | 'text' | 'module' | 'asset';
+  /** User-assigned cell name (shown in the nav instead of the source preview). */
+  name?: string;
   preview?: string;
   running?: boolean;
   focused?: boolean;
@@ -33,6 +37,8 @@ export type NotebookEvalCellOpts = {
   signal?: AbortSignal;
   cellId?: string;
   cellIndex?: number;
+  /** Live output: called when the running cell emits a Display value to render now. */
+  onEmit?: (cellId: string | undefined, value: unknown) => void;
 };
 
 export type NotebookBridge = {
@@ -84,6 +90,8 @@ export type NotebookApi = {
   runCellById?: (id: string) => void | Promise<void>;
   stopCellById?: (id: string) => void;
   focusCellById?: (id: string) => void;
+  deleteCellById?: (id: string) => void;
+  renameCellById?: (id: string, name: string) => void;
   /** Cells for per-cell Visual tab rendering. */
   notebookCells?: () => NotebookCellInfo[];
 };
@@ -223,8 +231,9 @@ let notebookLibPromise: Promise<{
 }> | null = null;
 
 async function importPublicModule(url: string): Promise<any> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`failed to load ${url}: ${res.status}`);
+  const resolved = resolveLibUrl(url);
+  const res = await fetch(resolved);
+  if (!res.ok) throw new Error(`failed to load ${resolved}: ${res.status}`);
   const blobUrl = URL.createObjectURL(new Blob([await res.text()], { type: 'text/javascript' }));
   try {
     return await import(/* @vite-ignore */ blobUrl);
