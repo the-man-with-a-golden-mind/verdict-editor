@@ -18,7 +18,8 @@
     "test:e2e:notebook": "npm run build:all && node tests-js/notebook-e2e.test.mjs",
     "test:e2e:notebook-ui": "npm run build:notebook && npm run build && node tests-js/notebook-ui-e2e.test.mjs",
     "test:e2e:prop-editor": "npm run build:all && node tests-js/notebook-prop-editor-e2e.test.mjs",
-    "test:e2e:regression": "npm run build:all && node tests-js/regression-e2e.test.mjs"
+    "test:e2e:regression": "npm run build:all && node tests-js/regression-e2e.test.mjs",
+    "embed:build": "vite build --config vite.embed.config.mjs && node scripts/copy-embed-lib.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",

@@ -68,6 +68,51 @@ mountVerdictEditor(host, {
 });
 ```
 
+## Build a distributable (`dist/embed`)
+
+To drop the editor into another service without vendoring this repo's source,
+build the embed bundle:
+
+```
+npm run embed:build
+```
+
+This produces a self-contained, servable directory `dist/embed/`:
+
+| file | what it is |
+|---|---|
+| `verdict-editor.mjs` | the `<verdict-editor>` element + the programmatic API (ESM) |
+| `style.css` | the editor's styles — include once |
+| `assets/finvmWorker-*.js` | the FinVM Web Worker chunk (resolved relative to the `.mjs`) |
+| `lib/*.mjs` | the runtime bundles the editor fetches at load (compiler, FinVM, notebook UI, plotly, ast, hylograph) |
+| `index.html` | a minimal integration example (also `examples/embed/index.html`) |
+
+The host serves `dist/embed/` (or copies the pieces into its own asset
+pipeline), includes `style.css`, imports `verdict-editor.mjs`, and mounts:
+
+```html
+<link rel="stylesheet" href="/assets/verdict/style.css" />
+<div id="host"></div>
+<script type="module">
+  import { mountVerdictEditor, restAdapter } from "/assets/verdict/verdict-editor.mjs";
+  mountVerdictEditor(document.getElementById("host"), {
+    notebookId: currentNotebookId,
+    libBaseUrl: "/assets/verdict/lib",                 // where you serve dist/embed/lib
+    storage: restAdapter({ baseUrl: "/api/notebooks", headers: () => ({ authorization: `Bearer ${token}` }) }),
+  });
+</script>
+```
+
+Notes:
+- The notebook UI (cell gutter, cells-nav, spreadsheet) lives in `lib/notebook.mjs`
+  and **self-registers on load** — no separate app shell (`app.js`) is required.
+- The Web Worker is emitted as its own chunk and located via `import.meta.url`, so
+  it resolves wherever the `.mjs` is served. If the worker can't start, the editor
+  falls back to main-thread evaluation. Re-bundling `verdict-editor.mjs` through a
+  host bundler is fine as long as that bundler preserves `new URL(..., import.meta.url)`
+  worker resolution.
+- `libBaseUrl` lets the lib bundles live anywhere (a CDN, a versioned asset path).
+
 ## Notes
 - The effect/runtime layer (`effectDriver.ts`, `notebookEval.ts`, `finvmClient.ts`) is TypeScript; the PureScript pieces are the UI components (cell gutter, cells-nav, project). Config/adapters live in TS alongside them.
 - The standalone app's `public/app.js` (the ps-spa shell) is a prebuilt artifact, so the zero-config fallback stays the finance template rather than relying on a shell change.
