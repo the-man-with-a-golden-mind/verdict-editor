@@ -1,4 +1,4 @@
-module Display exposing (dText, dTrace, dLine, dArea, dStep, dMarkers, dBar, dScatter, dLineW, dHistogram, dCandles, dChart, dChartY, dChartY2, dChartLog, dStack, dRow, dCol, dTable, dSheet, dGrid, dSection, dBox)
+module Display exposing (dText, dTrace, dLine, dArea, dStep, dMarkers, dBar, dScatter, dLineW, dHistogram, dCandles, dChart, dChartY, dChartY2, dChartLog, dStack, dRow, dCol, dTable, dSheet, dGrid, dSection, dBox, dFull, dTab, dTabs)
 
 -- Display: build rich notebook output (Plotly charts, text, tables, and
 -- row/col/stack layouts) as Json. Each constructor returns a small record that
@@ -108,3 +108,16 @@ dSection title items = { kind = "section", title = title, items = items }
 -- child element by the renderer, no extra div). Works on any block.
 dBox : String -> Json -> Json
 dBox cls child = { kind = "box", cls = cls, child = child }
+
+-- A fullscreen-able wrapper: the renderer adds a toggle that expands the child
+-- to a full-screen overlay (charts re-fit automatically).
+dFull : Json -> Json
+dFull child = { kind = "full", child = child }
+
+-- One tab: a label and its content. Use inside dTabs.
+dTab : String -> Json -> Json
+dTab label content = { label = label, content = content }
+
+-- A tab strip: only the active tab's content is shown.
+dTabs : List Json -> Json
+dTabs tabs = { kind = "tabs", tabs = tabs }
