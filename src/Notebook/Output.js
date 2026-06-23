@@ -23,23 +23,43 @@ export const renderStructure = (host) => (doc) => () => {
 const escAttr = (s) => String(s).replace(/["\\]/g, "\\$&");
 
 // Walk the Display tree (same path keys as the PS view) and fill each leaf into
-// its placeholder: markdown text, spreadsheet tables, and (batched) charts via the
-// keyed ChartManager (react+uirevision keeps zoom; ResizeObserver keeps it fitted).
+// its placeholder: markdown text, spreadsheet tables/sheets, and (batched) charts
+// via the keyed ChartManager (react+uirevision keeps zoom; ResizeObserver fits).
+// `box` merges onto its child (same key); layouts recurse by index.
 export const syncLeavesImpl = (host) => (raw) => (bridge) => () => {
   const charts = [];
   const walk = (node, key) => {
     const d = decodeDisplay(node);
     if (!d || !d.kind) return;
-    if (d.kind === "text") {
-      const el = host.querySelector(`[data-text-key="${escAttr(key)}"]`);
-      if (el) el.innerHTML = markdownToHtml(d.text ?? "");
-    } else if (d.kind === "chart") {
-      charts.push({ key, spec: d });
-    } else if (d.kind === "table") {
-      const el = host.querySelector(`[data-table-key="${escAttr(key)}"]`);
-      if (el) renderSpreadsheetTable(el, d.rows ?? []);
-    } else if (d.kind === "stack" || d.kind === "col" || d.kind === "row") {
-      (d.items ?? []).forEach((it, i) => walk(it, key + "/" + i));
+    switch (d.kind) {
+      case "box":
+        walk(d.child, key);
+        break;
+      case "text": {
+        const el = host.querySelector(`[data-text-key="${escAttr(key)}"]`);
+        if (el) el.innerHTML = markdownToHtml(d.text ?? "");
+        break;
+      }
+      case "chart":
+        charts.push({ key, spec: d });
+        break;
+      case "table": {
+        const el = host.querySelector(`[data-table-key="${escAttr(key)}"]`);
+        if (el) renderSpreadsheetTable(el, d.rows ?? []);
+        break;
+      }
+      case "sheet": {
+        const el = host.querySelector(`[data-sheet-key="${escAttr(key)}"]`);
+        if (el) renderSpreadsheetTable(el, d.rows ?? []);
+        break;
+      }
+      case "stack":
+      case "col":
+      case "row":
+      case "grid":
+      case "section":
+        (d.items ?? []).forEach((it, i) => walk(it, key + "/" + i));
+        break;
     }
   };
   walk(raw, "r");
@@ -51,12 +71,23 @@ export const readKind = (f) => {
   return (d && d.kind) || "";
 };
 
-export const readTitle = (f) => {
+export const readStr = (f) => (field) => {
   const d = decodeDisplay(f);
-  return (d && d.title) || "";
+  return d && d[field] != null ? String(d[field]) : "";
 };
 
-export const readItems = (f) => {
+export const readArr = (f) => (field) => {
   const d = decodeDisplay(f);
-  return (d && d.items) || [];
+  return d && Array.isArray(d[field]) ? d[field] : [];
+};
+
+export const readField = (f) => (field) => {
+  const d = decodeDisplay(f);
+  return d && d[field] != null ? d[field] : {};
+};
+
+export const readIntField = (f) => (field) => (def) => {
+  const d = decodeDisplay(f);
+  const n = Number(d && d[field]);
+  return Number.isFinite(n) ? Math.trunc(n) : def;
 };
