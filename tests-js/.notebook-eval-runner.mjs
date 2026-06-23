@@ -482,7 +482,7 @@ function vmValueToDisplay(value, typeSig) {
   const js = valueToJs(value);
   if (js && typeof js === "object" && !Array.isArray(js)) {
     const o = js;
-    if (typeof o.kind === "string" && ["text", "chart", "table", "stack", "row", "col"].includes(o.kind)) {
+    if (typeof o.kind === "string" && ["text", "chart", "table", "stack", "row", "col", "sheet", "grid", "section", "box", "full", "tabs"].includes(o.kind)) {
       return o;
     }
   }

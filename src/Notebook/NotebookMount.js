@@ -112,7 +112,7 @@ async function renderOutputBlock(block, o, bridge) {
     block.innerHTML = `<div class="text-xs text-rose-400">${escapeHtml(o.error ?? "Error")}</div>`;
     return;
   }
-  await renderDisplayInto(block, o.display ?? o.json, bridge);
+  (globalThis.__notebookRenderOutput ?? renderDisplayInto)(block, o.display ?? o.json, bridge);
 }
 
 export function mountNotebookImpl(selector) {
@@ -328,29 +328,11 @@ export function mountNotebookImpl(selector) {
             void patchCellDom(cellId);
             return;
           }
-          // Live re-render without the view jumping. Two things move on each emit:
-          // the output's own scroll, and — the real culprit — the outer cell stack.
-          // renderDisplayInto is async (charts), so clearing now collapses the
-          // output box to zero height; the stack reflows up and snaps the reader to
-          // the top, refilling a tick later. Freeze the box's current height across
-          // the swap so nothing reflows, then restore BOTH scroll positions (the
-          // inner output and the outer stack) once the new content is painted. This
-          // is generic — it applies to every cell's output, no per-cell logic.
-          const innerTop = host.scrollTop;
-          const innerLeft = host.scrollLeft;
-          const stackTop = stack.scrollTop;
-          const prevHeight = host.style.height;
-          host.style.height = `${host.offsetHeight}px`;
-          const restore = () => {
-            host.style.height = prevHeight; // back to the cell's sizing mode (capped/none/pinned)
-            host.scrollTop = innerTop;
-            host.scrollLeft = innerLeft;
-            stack.scrollTop = stackTop;
-          };
-          // Reconcile in place: same-shape updates reuse the chart elements (so
-          // Plotly.react keeps the viewer's zoom/pan); only a structural change
-          // rebuilds. No innerHTML wipe on the common path → no collapse/flash.
-          Promise.resolve(reconcileDisplayInto(host, value, bridge)).then(restore, restore);
+          // The PureScript output renderer diffs the structure in place (ps-spa
+          // reconcile) and updates chart leaves via react+uirevision — so scroll,
+          // focus, and chart zoom survive with no manual bookkeeping. The three
+          // interim patches (height-freeze, scroll-restore, JS reconcile) are gone.
+          (globalThis.__notebookRenderOutput ?? renderDisplayInto)(host, value, bridge);
         }
 
         function concatenate() {
@@ -1059,7 +1041,7 @@ export function mountNotebookImpl(selector) {
           hostEl.innerHTML = "";
           // Actor cells render whatever they last emitted on the live channel.
           if (state.liveEmit[cell.id] !== undefined) {
-            await renderDisplayInto(hostEl, state.liveEmit[cell.id], bridge);
+            (globalThis.__notebookRenderOutput ?? renderDisplayInto)(hostEl, state.liveEmit[cell.id], bridge);
             return true;
           }
           const names = outputKeysForCell(cell);

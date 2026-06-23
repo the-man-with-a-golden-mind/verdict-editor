@@ -1,9 +1,9 @@
-module Display exposing (dText, dTrace, dLine, dArea, dStep, dMarkers, dBar, dScatter, dLineW, dHistogram, dCandles, dChart, dChartY, dChartY2, dChartLog, dStack, dRow, dCol, dTable)
+module Display exposing (dText, dTrace, dLine, dArea, dStep, dMarkers, dBar, dScatter, dLineW, dHistogram, dCandles, dChart, dChartY, dChartY2, dChartLog, dStack, dRow, dCol, dTable, dSheet, dGrid, dSection, dBox, dFull, dTab, dTabs)
 
 -- Display: build rich notebook output (Plotly charts, text, tables, and
 -- row/col/stack layouts) as Json. Each constructor returns a small record that
 -- coerces to Json, so a `List Json` can hold differently-shaped blocks. The JS
--- renderer is generic — it draws whatever Json these emit, so no chart shape is
+-- renderer is generic - it draws whatever Json these emit, so no chart shape is
 -- hardcoded in the host. Compose like R's plotly bindings.
 
 -- Leaves. -------------------------------------------------------------------
@@ -91,3 +91,33 @@ dCol title items = { kind = "col", title = title, items = items }
 -- A spreadsheet table from rows (each row a Json object).
 dTable : List Json -> Json
 dTable rows = { kind = "table", rows = rows }
+
+-- An exportable spreadsheet from rows (each row a Json object).
+dSheet : List Json -> Json
+dSheet rows = { kind = "sheet", rows = rows }
+
+-- A responsive grid of N columns.
+dGrid : Int -> List Json -> Json
+dGrid cols items = { kind = "grid", cols = cols, items = items }
+
+-- A titled, bordered panel.
+dSection : String -> List Json -> Json
+dSection title items = { kind = "section", title = title, items = items }
+
+-- A styled wrapper: applies Tailwind classes to its child (merged onto the
+-- child element by the renderer, no extra div). Works on any block.
+dBox : String -> Json -> Json
+dBox cls child = { kind = "box", cls = cls, child = child }
+
+-- A fullscreen-able wrapper: the renderer adds a toggle that expands the child
+-- to a full-screen overlay (charts re-fit automatically).
+dFull : Json -> Json
+dFull child = { kind = "full", child = child }
+
+-- One tab: a label and its content. Use inside dTabs.
+dTab : String -> Json -> Json
+dTab label content = { label = label, content = content }
+
+-- A tab strip: only the active tab's content is shown.
+dTabs : List Json -> Json
+dTabs tabs = { kind = "tabs", tabs = tabs }

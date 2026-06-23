@@ -42,6 +42,7 @@ const jsCopies = [
   "VerdictSyntax.js",
   "VerdictLanguageService.js",
   "PlotlyFFI.js",
+  "ChartManager.js",
 ];
 
 console.log("Building notebook PureScript…");
