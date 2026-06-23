@@ -42,10 +42,10 @@ mergeCls base extra =
 viewDisplay :: String -> Boolean -> String -> Foreign -> H.Html (Effect Unit)
 viewDisplay extra inRow key node =
   case readKind node of
-    "box" -> viewDisplay (mergeCls extra (readStr node "class")) inRow key (readField node "child")
+    "box" -> viewDisplay (mergeCls extra (readStr node "cls")) inRow key (readField node "child")
     "text" ->
       H.node "div"
-        [ H.className (mergeCls "prose-invert text-sm text-slate-200 leading-relaxed notebook-text-output" extra)
+        [ H.className (mergeCls "prose-invert notebook-text-output" extra)
         , H.dataAttr "text-key" key
         ]
         []
