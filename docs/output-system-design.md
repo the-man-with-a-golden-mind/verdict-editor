@@ -16,6 +16,20 @@ The DSL already exists in embryo — `lib/verdict/Display.verdict` (`dText`, `dS
 styling/fullscreen/export, and grow the widget + layout set. **Existing constructors keep
 working** (additive, backward compatible — the finance notebook is untouched).
 
+## Status — Phase 1 BUILT (branch `output-system`)
+The renderer redesign + the styled widget DSL are implemented, PureScript-first, and
+verified in-browser:
+- `Notebook.Output` (ps-spa keyed vdom + mini-TEA) + `ChartManager` (Plotly + ResizeObserver)
+  replace the JS renderer; the three interim patches are deleted (`3fec94c`).
+- Widgets/layouts: `dText`, `dTable`, `dSheet` (CSV export), `dChart*`, `dStack`/`dCol`/`dRow`,
+  `dGrid`, `dSection`, `dTabs`/`dTab`, `dFull`, and `dBox` styling (`cd331bd`, `b374fea`, `ba46b7a`).
+- Tailwind safelist + cascade-layer precedence so user `dBox` classes resolve and override.
+- Fullscreen + tabs are interactive via the per-host mini-TEA state.
+- Gallery demo: `src/editor/templates/gallery.ts` (`galleryConfig()`).
+
+Remaining: Phase 2 (interactive `dSelect`/`dInput`, reactive tabs via the `__widget__`
+channel) and Phase 3 (more export formats, runtime-Tailwind opt-in, more widgets).
+
 ## The schema (contract between Verdict programs and the renderer)
 Every node is `{ kind, ...fields }`. Two cross-cutting, optional concerns are handled by
 **wrapper nodes** (Verdict has no record-update, so wrappers compose cleanly and the renderer

@@ -2659,3 +2659,4 @@ export {
   restAdapter,
 } from './editor/storageAdapters';
 export { financeConfig } from './editor/templates/finance';
+export { galleryConfig } from './editor/templates/gallery';

@@ -119,28 +119,44 @@ export const exportSheetCsv = (node) => () => {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
 
+// Plain object access (parse a JSON string, unwrap a `display` envelope) WITHOUT
+// the kind-wrapping decodeDisplay does — so we can read fields off nodes that have
+// no `kind` (e.g. a tab's { label, content }).
+const asObj = (f) => {
+  if (f == null) return {};
+  if (typeof f === "string") {
+    try {
+      return JSON.parse(f);
+    } catch {
+      return {};
+    }
+  }
+  if (typeof f === "object") return f.display != null ? asObj(f.display) : f;
+  return {};
+};
+
 export const readKind = (f) => {
-  const d = decodeDisplay(f);
-  return (d && d.kind) || "";
+  const d = asObj(f);
+  return typeof d.kind === "string" ? d.kind : "";
 };
 
 export const readStr = (f) => (field) => {
-  const d = decodeDisplay(f);
-  return d && d[field] != null ? String(d[field]) : "";
+  const d = asObj(f);
+  return d[field] != null ? String(d[field]) : "";
 };
 
 export const readArr = (f) => (field) => {
-  const d = decodeDisplay(f);
-  return d && Array.isArray(d[field]) ? d[field] : [];
+  const d = asObj(f);
+  return Array.isArray(d[field]) ? d[field] : [];
 };
 
 export const readField = (f) => (field) => {
-  const d = decodeDisplay(f);
-  return d && d[field] != null ? d[field] : {};
+  const d = asObj(f);
+  return d[field] != null ? d[field] : {};
 };
 
 export const readIntField = (f) => (field) => (def) => {
-  const d = decodeDisplay(f);
-  const n = Number(d && d[field]);
+  const d = asObj(f);
+  const n = Number(d[field]);
   return Number.isFinite(n) ? Math.trunc(n) : def;
 };
